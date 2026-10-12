@@ -525,3 +525,47 @@ func TestExecuteOutOfBoundsHandlerReplies(t *testing.T) {
 		t.Fatalf("Output = %q, want the handler's canned reply", exec.Output)
 	}
 }
+
+// twoFinishingSteps seeds a plan whose two steps both finish, so the reply
+// has to be merged and the summarizer runs.
+func twoFinishingSteps(t *testing.T) *TodoListExecutive {
+	t.Helper()
+	exec := replyExecutive(cannedTree("tree-a", "A finished"), cannedTree("tree-b", "B finished"))
+	seedPlan(t, exec, "tree-a", "tree-b")
+	return exec
+}
+
+func TestExecuteSummarizerFailureSurfaces(t *testing.T) {
+	noModel(t)
+	exec := twoFinishingSteps(t)
+
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		sig = exec.Execute(ctx, userTurn())
+	})
+
+	es, ok := sig.(*ErrorSignal)
+	if !ok {
+		t.Fatalf("Execute returned %T (%v), want *ErrorSignal from the summarizer", sig, sig)
+	}
+	if !strings.Contains(es.ErrorMessage, "OPENAI_TOKEN") {
+		t.Fatalf("ErrorMessage = %q, want the missing-token error", es.ErrorMessage)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty: a failed summarizer must not reply with the user's words", exec.Output)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps, want 0: both steps finished", n)
+	}
+
+	end := endCall(traced, "summarize")
+	if end == nil {
+		t.Fatal("no end_call named summarize on the trace: the summarizer is not called through the traced wrapper")
+	}
+	if end.Error == nil {
+		t.Fatal("the summarize end_call carries no Error")
+	}
+	if end.Signal == nil || end.Signal.Type != "error" {
+		t.Fatalf("the summarize end_call signal = %+v, want type error", end.Signal)
+	}
+}

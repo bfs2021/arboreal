@@ -541,18 +541,31 @@ final:
 	t := template.Must(template.New("summarizer").Parse(prompt))
 	t.Execute(&buf, info)
 
-	m, _ := LLMCompletionState(LLMCompletionOptions{
-		System: buf.String(),
-	}).Lambda(ctx, AnnotatedMessages{
+	// The summarizer is the executive's own state, called through the
+	// traced wrapper so its begin and end ride the trace like any state's.
+	// Model is left empty: it resolves to the context default or the
+	// fallback, as the behaviors' states do.
+	summarize := LLMCompletionState(LLMCompletionOptions{
+		Id:          e.Hash() + "-summarize",
+		Name:        "summarize",
+		Description: "Writes the turn's reply from the steps' results",
+		System:      buf.String(),
+	})
+	m, sig := summarize.Call(ctx, AnnotatedMessages{
 		*messages.LastMessage(),
 	})
+	if err, ok := sig.(*ErrorSignal); ok {
+		e.Output = ""
+		e.planDepth = 0
+		return err
+	}
 
 	last := m.LastMessage()
 	if last == nil {
 		panic("empty last message")
 	}
 
-	e.Output = m.LastMessage().Content
+	e.Output = last.Content
 	e.planDepth = 0
 	return nil
 }
