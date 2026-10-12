@@ -614,12 +614,20 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 		}
 	}
 
-	e.Execute(ctx, messages)
+	sig := e.Execute(ctx, messages)
 
-	messages = AppendToMessages(messages, llm.ChatCompletionMessage{
-		Role:    llm.ChatMessageRoleAssistant,
-		Content: e.Output,
-	})
+	// A turn that produced a reply appends it; a turn that did not returns
+	// the list it was given, unchanged, and the failure. A pause inside is
+	// still not reported: the snapshot is how a caller finds out.
+	var err error
+	if es, ok := sig.(*ErrorSignal); ok {
+		err = es
+	} else {
+		messages = AppendToMessages(messages, llm.ChatCompletionMessage{
+			Role:    llm.ChatMessageRoleAssistant,
+			Content: e.Output,
+		})
+	}
 
 	now := time.Now()
 	telem.End = &now
@@ -628,11 +636,13 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 		ID:        e.Hash(),
 		ClientID:  e.ClientID,
 		Name:      e.Name(),
+		Error:     err,
 		Message:   "leaving planner state",
 		Telemetry: &telem,
+		Signal:    TraceForSignal(sig),
 	})
 
-	return messages, nil
+	return messages, sig
 }
 
 func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {

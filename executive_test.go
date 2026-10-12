@@ -685,3 +685,49 @@ func TestExecuteLonePausedStepBesideTombstoneRepliesAsWritten(t *testing.T) {
 		t.Fatalf("kept plan = %d steps, want the paused step and the carried tombstone", n)
 	}
 }
+
+func TestCallReturnsTheFailure(t *testing.T) {
+	noModel(t)
+	exec := twoFinishingSteps(t)
+	in := userTurn()
+
+	var out AnnotatedMessages
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		out, sig = exec.Call(ctx, in)
+	})
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("Call returned %d messages, want the %d it was given: no reply must be appended on failure", len(out), len(in))
+	}
+
+	end := endCall(traced, exec.Name())
+	if end == nil {
+		t.Fatal("no end_call for the executive on the trace")
+	}
+	if end.Error == nil {
+		t.Fatal("the executive's end_call carries no Error")
+	}
+	if end.Signal == nil || end.Signal.Type != "error" {
+		t.Fatalf("the executive's end_call signal = %+v, want type error", end.Signal)
+	}
+}
+
+func TestCallAppendsTheReply(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))
+	seedPlan(t, exec, "tree-a")
+	in := userTurn()
+
+	out, sig := exec.Call(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if len(out) != len(in)+1 || out.LastMessage().Content != "the reply, as written" {
+		t.Fatalf("Call returned %d messages ending %q, want the input plus the reply", len(out), out.LastMessage().Content)
+	}
+}
