@@ -181,11 +181,11 @@ Bookshelf: I can recommend a book, check whether we have one in stock, or put on
 
 $ go run ./examples/bookshelf "I love science fiction — can you recommend something?"
 
-Bookshelf: The customer said: "I love science fiction — can you recommend something?". The assistant recommends "Dune" by Frank Herbert, as it's a classic that intricately weaves politics, ecology, and spirituality into a mesmerizing sci-fi narrative.
+Bookshelf: I recommend "Dune" by Frank Herbert, as it is a groundbreaking epic that explores complex themes of politics, religion, and ecology in a richly developed universe.
 
 $ go run ./examples/bookshelf "Do you have The Dispossessed in stock?"
 
-Bookshelf: The customer said: "Do you have The Dispossessed in stock?". Yes, we have "The Dispossessed" by Ursula K. Le Guin in stock. There are 2 copies available for $12.00 each.
+Bookshelf: Yes, we have "The Dispossessed" by Ursula K. Le Guin in stock. There are 2 copies available, and it costs $12.00.
 
 $ go run ./examples/bookshelf "Great — put it on hold for me, please."
 

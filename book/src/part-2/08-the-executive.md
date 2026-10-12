@@ -37,7 +37,7 @@ A plan step is an `ExecGeneratedStep{Behavior, Messages, ReplanTombstone}`: the 
 Run it with `go run ./examples/oneshot`; it needs `OPENAI_TOKEN` and exits on its own. One run printed:
 
 ```text
-The capital of France is Paris. It's known for its rich history, art, culture, and landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral.
+The capital of France is Paris.
 ```
 
 Two model calls: the planner and the tree's one state. One step ran and finished, so its reply comes back as written; the summarizer runs only when there is something to merge: two or more steps, or a lone step that failed. Note what the example does not set: no `Preamble` and no `OutOfBoundsHandler`. Both omissions are sharp edges below.
@@ -72,9 +72,9 @@ $
 
 [Assistant Response]
 
-Whispers of the wind,
-Golden leaves dance in the rain,
-Nature's soft embrace.
+Whispers of the chill,
+Crimson leaves dance in the breeze,
+Autumn's tears descend.
 
 [User Message]
 
@@ -83,27 +83,27 @@ $
 
 [Assistant Response]
 
-Waves whisper to shore,
-Endless blue, a tranquil sigh,
-Secrets deep reside.
+Waves kiss the soft shore,
+Endless whispers of the deep,
+Ocean's lullaby.
 
-Upon the shore where ocean's whispers dwell,
-The waves, like courtiers, dance with the breeze,
-In twilight's glow, their secrets weave a spell,
-As sunbeams glisten on the rolling seas.
+O mighty sea, thou vast and endless blue,
+With waves that dance like spirits in the night,
+Thy whispered secrets in the breeze anew,
+Do charm the weary soul with pure delight.
 
-With azure depths that cradle dreams untold,
-The tides, like time, do ebb and flow with grace,
-In tempest's wrath or gentle calm, behold,
-The sea's vast heart, a mirror of our place.
+Upon thy shores, the sands of time do drift,
+Each grain a story of the tides' embrace,
+In tempest's roar or gentle wave’s soft lift,
+Thou art a canvas, nature's artful grace.
 
-It sings of love, of loss, of ancient lore,
-A siren's call that beckons from afar,
-Each grain of sand, a story to explore,
-The moon's soft gaze, a guiding silver star.
+When storms arise, thy fury doth enthrall,
+Yet in thy calm, a peace beyond compare,
+Thy depths hold mysteries that beckon all,
+A siren’s call, a lover’s breath of air.
 
-So let us wander by the ocean's seam,
-For in its depths, we find the pulse of dream.
+So let me wander by thy rolling tide,
+For in thy presence, I shall bide my pride.
 
 [User Message]
 
