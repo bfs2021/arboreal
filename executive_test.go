@@ -2,6 +2,7 @@ package arboreal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -363,5 +364,160 @@ func TestTriage(t *testing.T) {
 				t.Fatalf("reply = (%q, %v), want (%q, %v)", got.Verbatim, got.HasReply, tc.wantReply, tc.wantHasReply)
 			}
 		})
+	}
+}
+
+// noModel makes the test hermetic: with both tokens empty, any model call
+// the framework makes fails, and since Task 3 a failed reply call is
+// returned as a signal rather than swallowed. captureLog silences the
+// fallback-model warning that the summarizer's unresolved Model triggers.
+func noModel(t *testing.T) {
+	t.Helper()
+	t.Setenv("OPENAI_TOKEN", "")
+	t.Setenv("ANTHROPIC_TOKEN", "")
+	captureLog(t)
+}
+
+// userTurn is a fresh one-message transcript ending on the user.
+func userTurn() AnnotatedMessages {
+	return AppendToMessages(nil, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Hello"})
+}
+
+// cannedTree is a one-state tree that replies with text and finishes.
+func cannedTree(id, text string) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "replies with "+text, "example", id)
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	tree.AddState(reply)
+	return &tree
+}
+
+// pausingTree replies with text and then pauses.
+func pausingTree(id, text string) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "replies with "+text+" and waits", "example", id)
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	wait := PauseState("wait for the user")
+	wait.HashId = id + "-wait"
+	wait.StateName = "wait"
+	tree.AddTransition(reply, &wait)
+	return &tree
+}
+
+// replyExecutive is an executive over the given trees, with the preamble and
+// the out-of-bounds handler every executive should set.
+func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
+	var behaviors []Behavior
+	for _, tree := range trees {
+		behaviors = append(behaviors, tree)
+	}
+	exec := CreateTodoListExecutiveWithId("reply exec", "exercises the reply path", "exec-reply", behaviors...)
+	exec.Preamble = "You are a test executive."
+	exec.OutOfBoundsHandler = CannedResponseState("out of bounds")
+	return exec
+}
+
+// seedPlan puts one step per tree into exec's plan through Restore, the way
+// a planned turn would have, without a planner. Each step's one message is
+// a user-role direction, as Plan writes it. The messages are marshalled from
+// real values so the field names match the framework's; only the skeleton's
+// keys are typed by hand.
+func seedPlan(t *testing.T, exec *TodoListExecutive, treeIDs ...string) {
+	t.Helper()
+	var plan []map[string]any
+	for _, id := range treeIDs {
+		plan = append(plan, map[string]any{
+			"ref":      id,
+			"snapshot": map[string]any{},
+			"messages": AppendToMessages(nil, llm.ChatCompletionMessage{
+				Role: llm.ChatMessageRoleUser, Content: "direction for " + id,
+			}),
+			"replan_tombstone": false,
+		})
+	}
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{"plan": plan}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := snap.Restore(exec); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(exec.plan); n != len(treeIDs) {
+		t.Fatalf("seeded %d steps, want %d: a tree id does not match a behavior", n, len(treeIDs))
+	}
+}
+
+// drainTrace runs fn with a trace channel on the context and returns every
+// message the turn sent, in order.
+func drainTrace(fn func(ctx context.Context)) []*TraceMessage {
+	trace := make(Trace)
+	var got []*TraceMessage
+	done := make(chan struct{})
+	go func() {
+		for m := range trace {
+			got = append(got, m)
+		}
+		close(done)
+	}()
+	ctx := context.WithValue(context.Background(), "arboreal_trace", trace) //nolint:staticcheck // the framework reads this string key
+	fn(ctx)
+	close(trace)
+	<-done
+	return got
+}
+
+// endCall is the end_call trace message of the named sender, or nil.
+func endCall(messages []*TraceMessage, name string) *TraceMessage {
+	for _, m := range messages {
+		if m.Type == TraceMessageTypeCallEnd && m.Name == name {
+			return m
+		}
+	}
+	return nil
+}
+
+func TestExecuteOutOfBoundsFailureSurfaces(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-failing-handler",
+		StateName: "failing handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return history, &ErrorSignal{ErrorMessage: "handler failed", ErrorType: StateErrorTypeUnknown}
+		},
+	}
+	// No plan seeded: Execute goes straight to the handler.
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	es, ok := sig.(*ErrorSignal)
+	if !ok {
+		t.Fatalf("Execute returned %T (%v), want *ErrorSignal", sig, sig)
+	}
+	if es.ErrorMessage != "handler failed" {
+		t.Fatalf("ErrorMessage = %q, want the handler's", es.ErrorMessage)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty: a failed handler must not reply with the user's words", exec.Output)
+	}
+}
+
+func TestExecuteOutOfBoundsHandlerReplies(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "out of bounds" {
+		t.Fatalf("Output = %q, want the handler's canned reply", exec.Output)
 	}
 }

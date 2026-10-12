@@ -426,21 +426,30 @@ Rephrase the following statements or questions as a single question or statement
 {{ end }}
 `
 
-func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) {
+// Execute runs the plan and decides the turn's reply. It writes e.Output
+// and e.plan and returns a Signal: nil when Output holds the reply, the
+// *ErrorSignal of the out-of-bounds handler or of the summarizer when the
+// call that was to write the reply failed. On failure Output is empty and
+// e.plan holds the kept steps as a successful turn would have stored them.
+func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
 		if e.OutOfBoundsHandler == nil {
 			e.Output = "Please set an out-of-bounds handler, this request was unable to be planned."
-			return
+			return nil
 		}
 
-		m, _ := e.OutOfBoundsHandler.Call(ctx, AnnotatedMessages{
+		m, sig := e.OutOfBoundsHandler.Call(ctx, AnnotatedMessages{
 			{
 				ChatCompletionMessage: messages.LastMessage().ChatCompletionMessage,
 				Annotations:           make(map[string]Annotation),
 			},
 		})
+		if err, ok := sig.(*ErrorSignal); ok {
+			e.Output = ""
+			return err
+		}
 		e.Output = m.LastMessage().Content
-		return
+		return nil
 	}
 
 	var info = struct {
@@ -505,9 +514,7 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 			e.planDepth += 1
 
 			e.Plan(ctx, messages)
-			e.Execute(ctx, messages)
-
-			return
+			return e.Execute(ctx, messages)
 		}
 	}
 
@@ -522,7 +529,7 @@ final:
 		if len(e.plan) == 1 {
 			e.Output = e.plan[0].Messages.LastMessage().Content
 			e.planDepth = 0
-			return
+			return nil
 		}
 	}
 
@@ -543,6 +550,7 @@ final:
 
 	e.Output = m.LastMessage().Content
 	e.planDepth = 0
+	return nil
 }
 
 func (e *TodoListExecutive) Hash() string {
