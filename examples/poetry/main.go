@@ -9,7 +9,7 @@
 // Try these, submitting each with a line containing only "$":
 //
 //   - "A haiku about autumn rain"         → one step, write_haiku (its
-//     output still passes through the executive's summarizer)
+//     output is the reply as written; no summarizer runs)
 //   - "A haiku and a sonnet about the sea" → two steps, run concurrently,
 //     then merged into one reply by the executive's summarizer
 //   - "What's the weather like?"          → an empty plan, so the

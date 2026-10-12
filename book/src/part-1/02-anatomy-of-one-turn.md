@@ -142,7 +142,9 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 	for {
 		(...)
 
-		e.Execute(ctx, e.History)
+		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
+			return fmt.Errorf("arboreal: the turn produced no reply: %w", sig)
+		}
 		(...)
 ```
 
@@ -209,7 +211,7 @@ The tree walks its graph with an explicit stack, `State`, kept on the struct. Th
 
 `Execute` receives one result, and its signal is a `*CollectUserInputSignal`. Its triage has three cases; any other signal is ignored and the step's output is lost. A `nil` signal means the step finished, and its last message becomes a summary. An `*ErrorSignal` becomes an "Error occurred" summary. A `*CollectUserInputSignal` means the step is waiting for the user, so `Execute` keeps the step in the new `plan`, and adds its last message to the summaries as well. *New* is literal: `Execute` builds a fresh plan every turn out of the paused steps alone and assigns it over the old one, so a finished step is not removed so much as never carried forward. A turn on which every step finishes leaves the plan empty — which is exactly what sends the next message back through `Plan` in step 2 instead of step 7's resume.
 
-Then it decides the turn's `Output`. If the kept plan holds exactly one entry, `Execute` takes a shortcut: `e.Output` is that step's last message, the reply the model just wrote in `chatState`, with no further model call. That is what happened in your run. Otherwise `Execute` makes one more `LLMCompletionState` call, on your last message, with one of two system prompts: if steps are still pending, a prompt that folds the collected summaries into a single question or statement; if nothing is pending, a prompt built from the transcript and the collected summaries. Note the asymmetry, and its edge: a step that is the only one left paused speaks for itself, even if another step finished in the same turn, and that finished step's output is dropped. Chapter 8 covers these paths and the `Re-plan` step, which this chapter skips.
+Then it decides the turn's `Output`. Exactly one step ran, and it paused, so `Execute` takes the direct route: `e.Output` is that step's last message, the reply the model just wrote in `chatState`, with no further model call. That is what happened in your run, and it is the rule whenever one step ran and ended normally or paused: the step speaks for itself. When two or more steps ran, `Execute` makes one more `LLMCompletionState` call, on your last message, with one of two system prompts: if steps are still pending, a prompt that folds the collected summaries into a single question or statement; if nothing is pending, a prompt built from the transcript and the collected summaries. That call can fail, and when it does `Execute` reports it rather than inventing a reply: `Output` stays empty and `Execute` returns the failure as its signal. Chapter 8 covers these paths and the `Re-plan` step, which this chapter skips.
 
 ### Step 6 — Send
 
@@ -255,13 +257,15 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			}
 		}
 
-		e.Execute(ctx, e.History)
+		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
+			return fmt.Errorf("arboreal: the turn produced no reply: %w", sig)
+		}
 		(...)
 ```
 
 `Plan` is skipped entirely. Instead `RunLoop` walks the pending steps and appends `e.History.LastMessage()`, your new message, to each step's own `Messages`. The paused step's list is now: the planner's direction, the model's first reply, and your second message. Then `Execute` runs again.
 
-`executePlan` calls `step.Behavior.Call` on the same tree copy as last turn. Its stack is empty, because the pause state had no children to push, so `BehaviorTree.Call` starts over: it pushes `Graph.Initial()`, resets `Traversed`, and runs `chatState` again. This time `chatState` sends the whole three-message list to the model, so the model sees a conversation with a prior exchange in it, and its reply is appended as the fourth message. `pauseState` runs, returns `CollectUserInputSignal`, the step is kept, the single-step shortcut fires, and `Output` is the new reply. The pattern repeats for as long as you keep typing. That is the whole chat loop: plan once, then resume the paused step forever, on a message list that grows by two messages every turn.
+`executePlan` calls `step.Behavior.Call` on the same tree copy as last turn. Its stack is empty, because the pause state had no children to push, so `BehaviorTree.Call` starts over: it pushes `Graph.Initial()`, resets `Traversed`, and runs `chatState` again. This time `chatState` sends the whole three-message list to the model, so the model sees a conversation with a prior exchange in it, and its reply is appended as the fourth message. `pauseState` runs, returns `CollectUserInputSignal`, the step is kept, it is the only step that ran, and `Output` is the new reply as written. The pattern repeats for as long as you keep typing. That is the whole chat loop: plan once, then resume the paused step forever, on a message list that grows by two messages every turn.
 
 ```admonish warning title="Sharp edge"
 There are two conversations. The executive's `History` is the transcript you would show a user: their messages and the executive's outputs. Each step's `Messages` is what the model actually sees: the planner's direction, the replies, and every later user message appended on resume. They are related but not identical, and when something looks wrong in a reply, the step's messages are the ones to inspect.

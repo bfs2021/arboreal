@@ -52,12 +52,11 @@ func craftHoldSnapshot() arboreal.Snapshot {
 // pauses; run 2, on a freshly built executive, takes the answer and
 // finishes — after which the snapshot is empty again, which is what tells
 // main to delete the file. No token needed: the hold tree is model-free,
-// and a single kept (paused) step short-circuits the executive's
-// summarizer (Chapter 8). Run 2 does reach the summarizer — its call fails
-// tokenless and is swallowed — which is why this test asserts the empty
-// snapshot, never run 2's reply text.
+// and on each turn exactly one step runs, so its reply is returned as
+// written and the executive's summarizer never runs (Chapter 8). Both
+// replies are asserted, and so is the empty snapshot.
 func TestHoldPausesAcrossProcesses(t *testing.T) {
-	t.Setenv("OPENAI_TOKEN", "") // run 2 reaches the summarizer; never spend a real token here
+	t.Setenv("OPENAI_TOKEN", "") // nothing here should reach a model; if the summarizer were reached, the turn would fail and the reply assertion would catch it
 	ctx := context.Background()
 
 	first := buildExecutive()
@@ -102,6 +101,10 @@ func TestHoldPausesAcrossProcesses(t *testing.T) {
 		Role: llm.ChatMessageRoleUser, Content: "Yes, go ahead.",
 	})
 	h2, _ = second.Call(ctx, h2)
+
+	if got := h2.LastMessage().Content; got != holdPlaced {
+		t.Fatalf("run 2 replied %q, want the hold confirmation as written", got)
+	}
 
 	second.History = h2
 	snap2, err := arboreal.TakeSnapshot(second)

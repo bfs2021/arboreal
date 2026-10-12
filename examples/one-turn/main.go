@@ -46,7 +46,9 @@ func buildExecutive() *arboreal.TodoListExecutive {
 // ANCHOR: turn
 // turn is one message's worth of work: append the user's words to the
 // transcript, run the executive once, hand back the transcript with the
-// reply appended. Call's second return value is always nil, so we drop it.
+// reply appended. Call's second return value is nil whenever the turn
+// produced a reply; a failed reply comes back as an *ErrorSignal with the
+// transcript unchanged, which this demo lets stand.
 func turn(ctx context.Context, exec *arboreal.TodoListExecutive,
 	transcript arboreal.AnnotatedMessages, content string) arboreal.AnnotatedMessages {
 

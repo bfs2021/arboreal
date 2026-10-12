@@ -129,10 +129,12 @@ func startMCP() *arboreal.MCPClientMux {
 // ANCHOR: hold
 // buildHoldTree is the one behavior that pauses — and it is model-free: a
 // canned question, a pause that outlives the process, and a lambda that
-// reads the customer's answer. The question the customer sees is the canned
-// line verbatim; the reply after the resume still passes through the
-// executive's summarizer (Chapter 8). Model-free is what lets main_test.go
-// drive the whole pause round trip without a token.
+// reads the customer's answer. The question and the reply after the resume
+// reach the customer as written whenever place_hold is the turn's only step:
+// the resumed turn always is, since only the paused step is kept, and the
+// first turn is whenever the planner picks the hold alone (Chapter 8).
+// Model-free is what lets main_test.go drive the whole pause round trip
+// without a token.
 func buildHoldTree() arboreal.BehaviorTree {
 	hold := arboreal.CreateBehaviorTreeWithId(
 		"place_hold",

@@ -56,7 +56,7 @@ The `Preamble` does three jobs. It pins the shape of a step's `direction` — re
 
 Then the design decision the rest of the program rests on: which trees pause. Only `place_hold` ends in a `PauseState`. That matters because a pause is the only thing that keeps a step alive into the next turn — Chapter 10's first condition, the `*CollectUserInputSignal` triage in `Execute` — so a tree that always ends in one is a tree whose step is never dropped. Every later message then resumes that step and the planner never chooses again. For a dedicated chat loop, such as `examples/snapshot-simple`, that is exactly right: there is only one behavior and the conversation *is* the behavior. For an agent with several jobs it is wrong, because the first request would capture every message after it. Here a pause means precisely one thing — this task needs the customer's answer before it can finish — and `recommend_book` and `check_availability` complete their step instead, leaving the plan empty and the planner free to choose afresh. Continuity between finished turns rides the transcript we hand to `Call`, not a step held open on the executive.
 
-Two things this arrangement does not promise. The first is that a recommendation comes from the shelf: `recommend_book`'s states never see the catalog — no tool, no `ExtraContext` carrying it — so the model recommends from what it knows, and may well name a book the store does not stock. That is correct behavior, and worth understanding as a general rule: a behavior's `Name` and `Description` are its interface to the planner, not a guarantee of capability, and the planner will route to a well-named tree whether or not the tree can deliver. The second is an answer to two questions at once, when one of them pauses: a plan where one step pauses and another completes leaves exactly one kept entry, the single-step shortcut fires, and `Output` becomes the paused step's last message while the completed step's answer sits unread in the summaries (Chapter 8). "Do you have it, and put it on hold" in one message therefore loses the availability answer.
+Two things this arrangement does not promise. The first is that a recommendation comes from the shelf: `recommend_book`'s states never see the catalog — no tool, no `ExtraContext` carrying it — so the model recommends from what it knows, and may well name a book the store does not stock. That is correct behavior, and worth understanding as a general rule: a behavior's `Name` and `Description` are its interface to the planner, not a guarantee of capability, and the planner will route to a well-named tree whether or not the tree can deliver. The second is a crisp answer to two questions at once, when one of them pauses: a plan where one step pauses and another completes goes through the work-in-process summarizer, which is asked to rephrase both outputs as a single question or statement (Chapter 8). "Do you have it, and put it on hold" in one message therefore gets the availability answer folded into the confirmation question, in the summarizer's words.
 
 ## The lifecycle
 
@@ -124,7 +124,7 @@ bookshelf-transcript.json
 $ go run ./examples/bookshelf "Yes, go ahead."
 (a question is pending — resuming the paused task)
 
-Bookshelf: The customer said: "Yes, go ahead.". Done — the book is on hold at the counter for three days.
+Bookshelf: Done — the book is on hold at the counter for three days.
 
 $ ls bookshelf-*.json
 bookshelf-transcript.json
@@ -134,7 +134,7 @@ There it is on disk. After the question, both files; after the answer, only the 
 
 The pause here sits *mid-chain*, between `ask-confirm` and `place-hold`. That is the half of Chapter 7's restart-vs-resume rule no earlier snapshot showed — the rule Chapter 10 carried across the process exit, now seen from the resume side. When `waitConfirm` returned its `*CollectUserInputSignal`, the tree pushed its children before returning, so `place-hold` was still on the `State` stack at snapshot time; a tree with a non-empty stack records its own entry, the step skeleton's nested `snapshot` carries it, and the restored copy resumes at `place-hold` instead of restarting at the question. Compare `examples/snapshot-simple`, where the pause is a leaf, the stack is empty, and the next turn re-runs the tree from its entry state.
 
-The two replies reach stdout by different routes. The pausing turn's reply is the canned question verbatim, because a single kept step short-circuits the summarizer (Chapter 8). The finishing turn has no kept step, so it does go through the summarizer, and what you read is the summarizer's rendering of `holdPlaced` rather than the constant itself. In this capture it kept the sentence intact behind its `The customer said: …` framing; another run may reword it. That is why the test below asserts the constant at the tree level and the empty snapshot at the executive level, and never the finishing reply.
+Both replies reach stdout by the same route: on each turn exactly one step ran, so its last message is the reply as written and no summarizer runs (Chapter 8). The pausing turn's reply is the canned question, and the finishing turn's reply is `holdPlaced`, the constant itself. That is why the test below can assert both replies, as well as the empty snapshot at the executive level.
 
 ## Watching it run
 
@@ -157,7 +157,7 @@ end_call   place_hold       leaving behavior tree  [signal: user "Wait for the c
 end_call   Bookshelf        leaving planner state
 ```
 
-Three nesting levels, read from the outside in: the executive's envelope around the whole turn, the tree the planner chose, and one begin/end pair per state the walk visited. Both states have names, including the pause — `waitConfirm.StateName = "wait-confirm"` — which is the difference between this trace and Chapter 11's, where the anonymous line was a `PauseState` nothing had named. The pause's signal rides the `end_call` of the state that raised it and again of the tree that returned it, and stops there: the executive's `end_call` carries none, because `Call` always returns `nil` however much paused inside it.
+Three nesting levels, read from the outside in: the executive's envelope around the whole turn, the tree the planner chose, and one begin/end pair per state the walk visited. Both states have names, including the pause — `waitConfirm.StateName = "wait-confirm"` — which is the difference between this trace and Chapter 11's, where the anonymous line was a `PauseState` nothing had named. The pause's signal rides the `end_call` of the state that raised it and again of the tree that returned it, and stops there: the executive's `end_call` carries none, because `Call` returns `nil` for every turn that produced a reply, however much paused inside it; only a failed reply puts a signal there.
 
 The out-of-bounds path prints a shorter trace, and the one state in it is still anonymous, both times:
 
@@ -181,11 +181,11 @@ Bookshelf: I can recommend a book, check whether we have one in stock, or put on
 
 $ go run ./examples/bookshelf "I love science fiction — can you recommend something?"
 
-Bookshelf: The customer said: "I love science fiction — can you recommend something?". The assistant recommends "Dune" by Frank Herbert, as it's a classic that intricately weaves politics, ecology, and spirituality into a mesmerizing sci-fi narrative.
+Bookshelf: I recommend "Dune" by Frank Herbert, as it is a groundbreaking epic that explores complex themes of politics, religion, and ecology in a richly developed universe.
 
 $ go run ./examples/bookshelf "Do you have The Dispossessed in stock?"
 
-Bookshelf: The customer said: "Do you have The Dispossessed in stock?". Yes, we have "The Dispossessed" by Ursula K. Le Guin in stock. There are 2 copies available for $12.00 each.
+Bookshelf: Yes, we have "The Dispossessed" by Ursula K. Le Guin in stock. There are 2 copies available, and it costs $12.00.
 
 $ go run ./examples/bookshelf "Great — put it on hold for me, please."
 
@@ -193,12 +193,12 @@ Bookshelf: I can put that title on hold at the counter for three days. Should I 
 
 $ go run ./examples/bookshelf "Yes, go ahead."
 
-Bookshelf: The customer said: "Yes, go ahead.". Done — the book is on hold at the counter for three days.
+Bookshelf: Done — the book is on hold at the counter for three days.
 ```
 
-Each run took a different path through the machinery. The greeting fits none of the three behaviors, so the `Preamble`'s escape clause produced an empty plan and the reply is the `OutOfBoundsHandler`'s canned sentence, with no tree and no summarizer between it and stdout. The second run is the annotation pipeline: `extract-genre` pinned the genre onto the customer's message, `recommend` read it back through `ExtraContext`, and the summarizer turned the result into the reply — *Dune*, a title the store's catalog never lists, because nothing in `recommend_book` ever sees the catalog. The third is the tool round — the count and the price match the catalog row exactly, which is the point of a state told to answer from the tool's result and never to guess. The fourth and fifth are the pause, across two processes.
+Each run took a different path through the machinery. The greeting fits none of the three behaviors, so the `Preamble`'s escape clause produced an empty plan and the reply is the `OutOfBoundsHandler`'s canned sentence, with no tree and no summarizer between it and stdout. The second run is the annotation pipeline: `extract-genre` pinned the genre onto the customer's message, `recommend` read it back through `ExtraContext`, and its reply is what you read — *Dune*, a title the store's catalog never lists, because nothing in `recommend_book` ever sees the catalog. The third is the tool round — the count and the price match the catalog row exactly, which is the point of a state told to answer from the tool's result and never to guess. The fourth and fifth are the pause, across two processes.
 
-Runs 2, 3 and 5 open by restating the direction — `The customer said: …` — which is not a quirk of the model but the `Preamble` showing through. `interpolatedPreamble` is the first line of the summarizer prompts as well as the planner prompt (Chapter 8), so an instruction written to keep the planner's directions faithful also reaches the state that writes the final reply, and it obeys. That is worth seeing once: the `Preamble` is not a planner setting, it is the executive's voice, and it costs a phrase at the head of every summarized reply.
+Runs 2, 3 and 5 are each one step that finished, so each reply is its state's own last message, as written. On these runs the `The customer said: …` preface that the `Preamble` asks for shows only in the planner's directions; the summarizer prompt, which also opens with it, is a path these replies no longer take. It would show again on a turn where two or more steps ran and the summarizer merged them, because `interpolatedPreamble` is the first line of the summarizer prompts as well as the planner prompt (Chapter 8). That is still worth knowing: the `Preamble` is the executive's voice wherever the executive itself writes the reply.
 
 Every one of those five runs began with nothing in memory. The two files did all the remembering.
 
@@ -212,7 +212,7 @@ The hold tree was built model-free so that a test could reach it, and both halve
 {{#include ../../../examples/bookshelf/main_test.go:exec-roundtrip}}
 ```
 
-It asserts the verbatim question on the pausing turn and an empty snapshot after the finishing one, and never the finishing reply, which belongs to the summarizer. Its first line, `t.Setenv("OPENAI_TOKEN", "")`, is a deliberate guard rather than housekeeping: the finishing turn does reach the summarizer, the call fails without a token, `Execute` discards the signal, and the assertions still hold — but a machine with a token in its environment would quietly spend one on every run of the suite.
+It asserts the question on the pausing turn, `holdPlaced` on the finishing one, and an empty snapshot after it. Its first line, `t.Setenv("OPENAI_TOKEN", "")`, is an assertion in disguise rather than housekeeping: nothing in this test should reach a model, and if something did, the call would fail without a token and `Call` would return the failure instead of a reply, which the next assertion catches. With a token in the environment the same mistake could pass by spending one.
 
 ```go
 {{#include ../../../examples/bookshelf/main_test.go:tree-roundtrip}}

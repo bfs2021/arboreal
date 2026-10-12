@@ -352,6 +352,56 @@ done:
 	return result
 }
 
+// turnOutcome is one turn's results sorted: the steps kept for the next
+// turn, what the summarizer would merge, and whether one step's last message
+// can stand as the reply on its own.
+type turnOutcome struct {
+	// Kept is the paused steps, in result order.
+	Kept []*ExecGeneratedStep
+	// Summaries is the last message of every finished, failed or paused
+	// step, finished steps first in completion order and then the paused
+	// ones; a failed step contributes "Error occurred: " and its error.
+	Summaries []string
+	// Verbatim is the reply when exactly one step ran and it ended with nil
+	// or a pause; HasReply says whether it is set.
+	Verbatim string
+	HasReply bool
+}
+
+// triage sorts the results of the steps that ran this turn. A nil signal is
+// a finished step and an *ErrorSignal a failed one: both contribute a
+// summary and neither is kept. A *CollectUserInputSignal is a paused step:
+// kept, and its last message is a summary too. Any other signal is a leaked
+// skip and contributes nothing. The reply is decided by what ran, not by
+// how many steps are kept: when exactly one step ran and it finished or
+// paused, its last message is the reply as written.
+func triage(results []PlanResult) turnOutcome {
+	var out turnOutcome
+	var paused []PlanResult
+	for _, result := range results {
+		switch t := result.Signal.(type) {
+		case *ErrorSignal:
+			out.Summaries = append(out.Summaries, "Error occurred: "+t.Error())
+		case *CollectUserInputSignal:
+			paused = append(paused, result)
+		case nil:
+			out.Summaries = append(out.Summaries, result.Messages.LastMessage().Content)
+		}
+	}
+	for _, result := range paused {
+		out.Kept = append(out.Kept, result.Step)
+		out.Summaries = append(out.Summaries, result.Messages.LastMessage().Content)
+	}
+	if len(results) == 1 {
+		switch results[0].Signal.(type) {
+		case nil, *CollectUserInputSignal:
+			out.Verbatim = results[0].Messages.LastMessage().Content
+			out.HasReply = true
+		}
+	}
+	return out
+}
+
 var executiveSummarizerPrompt = `{{ .Preamble }}
 
 Given the following chat transcript:
@@ -376,21 +426,36 @@ Rephrase the following statements or questions as a single question or statement
 {{ end }}
 `
 
-func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) {
+// Execute runs the plan and decides the turn's reply. It writes e.Output
+// and e.plan (and, on a re-plan, rewrites the last message of messages with
+// the direction and the summaries) and returns a Signal: nil when Output
+// holds the reply, the *ErrorSignal of the out-of-bounds handler or of the
+// summarizer when the call that was to write the reply failed. On failure
+// Output is empty and e.plan holds the kept steps as a successful turn would
+// have stored them.
+func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
+		// A turn that ends here ends like any other: the re-plan depth
+		// starts fresh next turn.
+		e.planDepth = 0
+
 		if e.OutOfBoundsHandler == nil {
 			e.Output = "Please set an out-of-bounds handler, this request was unable to be planned."
-			return
+			return nil
 		}
 
-		m, _ := e.OutOfBoundsHandler.Call(ctx, AnnotatedMessages{
+		m, sig := e.OutOfBoundsHandler.Call(ctx, AnnotatedMessages{
 			{
 				ChatCompletionMessage: messages.LastMessage().ChatCompletionMessage,
 				Annotations:           make(map[string]Annotation),
 			},
 		})
+		if err, ok := sig.(*ErrorSignal); ok {
+			e.Output = ""
+			return err
+		}
 		e.Output = m.LastMessage().Content
-		return
+		return nil
 	}
 
 	var info = struct {
@@ -405,35 +470,9 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 		info.Transcript += m.Role + ": " + m.Content + "\n"
 	}
 
-	var plan []*ExecGeneratedStep
-
-	var behaviorsToRetry []*ExecGeneratedStep
-	var collectResults []PlanResult
-
-	results := e.executePlan(ctx, e.plan)
-	for _, result := range results {
-		switch t := result.Signal.(type) {
-		case *ErrorSignal:
-			info.Summaries = append(info.Summaries, "Error occurred: "+t.Error())
-		case *CollectUserInputSignal:
-			collectResults = append(collectResults, result)
-		case nil:
-			info.Summaries = append(info.Summaries, result.Messages.LastMessage().Content)
-		}
-	}
-
-	if len(behaviorsToRetry) > 0 {
-		// TODO: Retry!
-		fmt.Println("would retry something here!")
-	}
-
-	if len(collectResults) > 0 {
-		for _, result := range collectResults {
-			plan = append(plan, result.Step)
-
-			info.Summaries = append(info.Summaries, result.Messages.LastMessage().Content)
-		}
-	}
+	outcome := triage(e.executePlan(ctx, e.plan))
+	info.Summaries = outcome.Summaries
+	plan := outcome.Kept
 
 	if e.plan[len(e.plan)-1].ReplanTombstone {
 		if len(plan) > 0 {
@@ -455,9 +494,7 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 			e.planDepth += 1
 
 			e.Plan(ctx, messages)
-			e.Execute(ctx, messages)
-
-			return
+			return e.Execute(ctx, messages)
 		}
 	}
 
@@ -465,34 +502,52 @@ final:
 
 	e.plan = plan
 
-	var prompt = executiveSummarizerPrompt
+	// One step ran and it finished or paused: its last message is the reply
+	// as written, and no model is called. A carried Re-plan tombstone is not
+	// a step that ran. Otherwise the summarizer merges the summaries.
+	if outcome.HasReply {
+		e.Output = outcome.Verbatim
+		e.planDepth = 0
+		return nil
+	}
+
+	prompt := executiveSummarizerPrompt
 	if len(e.plan) > 0 {
 		prompt = workInProcessSummarizerPrompt
-
-		if len(e.plan) == 1 {
-			e.Output = e.plan[0].Messages.LastMessage().Content
-			e.planDepth = 0
-			return
-		}
 	}
 
 	var buf bytes.Buffer
 	t := template.Must(template.New("summarizer").Parse(prompt))
 	t.Execute(&buf, info)
 
-	m, _ := LLMCompletionState(LLMCompletionOptions{
-		System: buf.String(),
-	}).Lambda(ctx, AnnotatedMessages{
+	// The summarizer is the executive's own state, called through the
+	// traced wrapper so its begin and end ride the trace like any state's.
+	// Model is left empty: it resolves to the context default or the
+	// fallback, as the behaviors' states do.
+	summarize := LLMCompletionState(LLMCompletionOptions{
+		Id:          e.Hash() + "-summarize",
+		Name:        "summarize",
+		Description: "Writes the turn's reply from the steps' results",
+		ClientID:    e.ClientID,
+		System:      buf.String(),
+	})
+	m, sig := summarize.Call(ctx, AnnotatedMessages{
 		*messages.LastMessage(),
 	})
+	if err, ok := sig.(*ErrorSignal); ok {
+		e.Output = ""
+		e.planDepth = 0
+		return err
+	}
 
 	last := m.LastMessage()
 	if last == nil {
 		panic("empty last message")
 	}
 
-	e.Output = m.LastMessage().Content
+	e.Output = last.Content
 	e.planDepth = 0
+	return nil
 }
 
 func (e *TodoListExecutive) Hash() string {
@@ -561,12 +616,20 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 		}
 	}
 
-	e.Execute(ctx, messages)
+	sig := e.Execute(ctx, messages)
 
-	messages = AppendToMessages(messages, llm.ChatCompletionMessage{
-		Role:    llm.ChatMessageRoleAssistant,
-		Content: e.Output,
-	})
+	// A turn that produced a reply appends it; a turn that did not returns
+	// the list it was given, unchanged, and the failure. A pause inside is
+	// still not reported: the snapshot is how a caller finds out.
+	var err error
+	if es, ok := sig.(*ErrorSignal); ok {
+		err = es
+	} else {
+		messages = AppendToMessages(messages, llm.ChatCompletionMessage{
+			Role:    llm.ChatMessageRoleAssistant,
+			Content: e.Output,
+		})
+	}
 
 	now := time.Now()
 	telem.End = &now
@@ -575,11 +638,13 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 		ID:        e.Hash(),
 		ClientID:  e.ClientID,
 		Name:      e.Name(),
+		Error:     err,
 		Message:   "leaving planner state",
 		Telemetry: &telem,
+		Signal:    TraceForSignal(sig),
 	})
 
-	return messages, nil
+	return messages, sig
 }
 
 func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
@@ -602,7 +667,9 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			}
 		}
 
-		e.Execute(ctx, e.History)
+		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
+			return fmt.Errorf("arboreal: the turn produced no reply: %w", sig)
+		}
 
 		e.History = AppendToMessages(e.History, llm.ChatCompletionMessage{
 			Role:    llm.ChatMessageRoleAssistant,

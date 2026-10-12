@@ -37,10 +37,10 @@ A plan step is an `ExecGeneratedStep{Behavior, Messages, ReplanTombstone}`: the 
 Run it with `go run ./examples/oneshot`; it needs `OPENAI_TOKEN` and exits on its own. One run printed:
 
 ```text
-The capital of France is Paris. It's known for its rich history, art, culture, and landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral.
+The capital of France is Paris.
 ```
 
-Three model calls: the planner, the tree's one state, and — since no step was left pending — the summarizer. Note what the example does not set: no `Preamble` and no `OutOfBoundsHandler`. Both omissions are sharp edges below.
+Two model calls: the planner and the tree's one state. One step ran and finished, so its reply comes back as written; the summarizer runs only when there is something to merge: two or more steps, or a lone step that failed. Note what the example does not set: no `Preamble` and no `OutOfBoundsHandler`. Both omissions are sharp edges below.
 
 ### Choosing between behaviors
 
@@ -72,9 +72,9 @@ $
 
 [Assistant Response]
 
-Whispers of the wind,
-Golden leaves dance in the rain,
-Nature's soft embrace.
+Whispers of the chill,
+Crimson leaves dance in the breeze,
+Autumn's tears descend.
 
 [User Message]
 
@@ -83,27 +83,27 @@ $
 
 [Assistant Response]
 
-Waves whisper to shore,
-Endless blue, a tranquil sigh,
-Secrets deep reside.
+Waves kiss the soft shore,
+Endless whispers of the deep,
+Ocean's lullaby.
 
-Upon the shore where ocean's whispers dwell,
-The waves, like courtiers, dance with the breeze,
-In twilight's glow, their secrets weave a spell,
-As sunbeams glisten on the rolling seas.
+O mighty sea, thou vast and endless blue,
+With waves that dance like spirits in the night,
+Thy whispered secrets in the breeze anew,
+Do charm the weary soul with pure delight.
 
-With azure depths that cradle dreams untold,
-The tides, like time, do ebb and flow with grace,
-In tempest's wrath or gentle calm, behold,
-The sea's vast heart, a mirror of our place.
+Upon thy shores, the sands of time do drift,
+Each grain a story of the tides' embrace,
+In tempest's roar or gentle wave’s soft lift,
+Thou art a canvas, nature's artful grace.
 
-It sings of love, of loss, of ancient lore,
-A siren's call that beckons from afar,
-Each grain of sand, a story to explore,
-The moon's soft gaze, a guiding silver star.
+When storms arise, thy fury doth enthrall,
+Yet in thy calm, a peace beyond compare,
+Thy depths hold mysteries that beckon all,
+A siren’s call, a lover’s breath of air.
 
-So let us wander by the ocean's seam,
-For in its depths, we find the pulse of dream.
+So let me wander by thy rolling tide,
+For in thy presence, I shall bide my pride.
 
 [User Message]
 
@@ -117,7 +117,7 @@ Sorry, I only write haikus and sonnets.
 [User Message]
 ```
 
-Each prompt took a different path through `Execute`. The first was a one-step plan, `write_haiku` with a direction restating the topic; the step finished with `nil`, so nothing was kept for the next turn, and the haiku still went through the summarizer before you saw it. The second became a two-step plan, `write_haiku` and `write_sonnet`, which ran at the same time in two goroutines on two tree copies; the summarizer merged the two poems into one reply. The weather question produced an *empty plan*: the `Preamble` told the planner to answer `[]` for anything that is not a poetry request, `Plan` parsed that into no steps, and `Execute` handed the message to `OutOfBoundsHandler`, whose canned text is the reply. No tree ran for that turn, and no summarizer either. This is Chapter 7's out-of-tree selector: one tree per alternative, and `examples/tree-loop`'s hand loop replaced by `RunLoop` plus a planner that picks the tree.
+Each prompt took a different path through `Execute`. The first was a one-step plan, `write_haiku` with a direction restating the topic; the step finished with `nil`, so nothing was kept for the next turn, and because it was the only step that ran, the haiku you saw is the state's reply as written. The second became a two-step plan, `write_haiku` and `write_sonnet`, which ran at the same time in two goroutines on two tree copies; two steps ran, so the summarizer merged the two poems into one reply. The weather question produced an *empty plan*: the `Preamble` told the planner to answer `[]` for anything that is not a poetry request, `Plan` parsed that into no steps, and `Execute` handed the message to `OutOfBoundsHandler`, whose canned text is the reply. No tree ran for that turn, and no summarizer either. This is Chapter 7's out-of-tree selector: one tree per alternative, and `examples/tree-loop`'s hand loop replaced by `RunLoop` plus a planner that picks the tree.
 
 ## How it works
 
@@ -163,17 +163,17 @@ Each step's `name` is then looked up in `behaviorLookup`, a map built from `Beha
 
 ### `Execute`
 
-`Execute(ctx, messages)` reads the plan from `e.plan` and reports back by writing `e.Output` and `e.plan`; it returns nothing. In order:
+`Execute(ctx, messages)` reads the plan from `e.plan`, reports back by writing `e.Output` and `e.plan`, and returns a `Signal`: `nil` when `Output` holds the reply, an `*ErrorSignal` when the call that was to write it failed, with `Output` left empty. In order:
 
-1. **Empty plan** → the `OutOfBoundsHandler` is called with the last user message and its last message becomes `Output`. With no handler, `Output` is the literal string `Please set an out-of-bounds handler, this request was unable to be planned.` The handler gets a one-message list, a copy of `messages.LastMessage()` with a fresh annotation map, so it starts from the user's words rather than a direction. Either way `Execute` returns here.
+1. **Empty plan** → the `OutOfBoundsHandler` is called with the last user message and its last message becomes `Output`. With no handler, `Output` is the literal string `Please set an out-of-bounds handler, this request was unable to be planned.` The handler gets a one-message list, a copy of `messages.LastMessage()` with a fresh annotation map, so it starts from the user's words rather than a direction. If the handler returns an `*ErrorSignal`, `Execute` returns it and `Output` stays empty. Either way `Execute` returns here.
 2. **Fan out** — `executePlan` starts one goroutine per non-tombstone step and calls `step.Behavior.Call(ctx, step.Messages)`; results are collected through a buffered channel after `WaitGroup.Wait`. Each goroutine writes the returned list back into `step.Messages`, which is how a paused step keeps its own growing transcript, and pushes a `PlanResult{Messages, Step, Signal}` onto the channel. Results arrive in completion order, not plan order, so the summaries below are in whatever order the steps finished.
 3. **Triage by signal** — `nil`: the step's last message joins the summaries; `*ErrorSignal`: `"Error occurred: …"` joins the summaries; `*CollectUserInputSignal`: the step is kept for the next turn *and* its last message joins the summaries. Any other signal (a leaked `*SkipSignal`) matches nothing: the step is neither summarized nor kept. (No retry ever happens, Chapter 6.)
 4. **Re-plan** — if the last step is a tombstone and nothing is paused: the direction plus all summaries are written into the last user message, `planDepth` is incremented, and `Plan` + `Execute` run again — until `MaxPlanDepth`. The write is literal: `messages[len(messages)-1].Content` becomes the tombstone's direction (or, if the planner left it empty, the user's message) followed by every summary, so the executive's `History` now ends with a rewritten user message, which the next planning call sees as the request. Once `planDepth` reaches `MaxPlanDepth` the rewrite still happens, but `Execute` jumps to the reply step with an empty kept plan. If some step *is* paused, the tombstone is carried into the kept plan behind the paused steps, to fire once they finish; by then `Call` or `RunLoop` will have appended each later user message to it too, so its "direction" is the latest user message.
-5. **Reply** — the kept (paused) steps become the new `plan`. If there is exactly one kept entry (a carried `Re-plan` tombstone counts as an entry, so it defeats the shortcut), `Output` is its last message and no model is called. Otherwise a summarizer prompt (`executiveSummarizerPrompt`, or `workInProcessSummarizerPrompt` when steps are still pending) merges the summaries into one reply with another `LLMCompletionState` call. Both prompts open with the interpolated `Preamble`. The finished-plan prompt carries a transcript of `messages`, one `role: content` line per message, then the summaries; the work-in-process prompt asks only to rephrase the summaries as a single question or statement. The call is `.Lambda` on a one-message list, `*messages.LastMessage()`, so the model sees the system prompt and the user's last message. The call's signal is discarded: if the summarizer call fails, the returned list ends with the user's message and that is what `Output` becomes — the executive echoes the user. The `panic("empty last message")` guard covers only an empty list, which this path never produces.
+5. **Reply** — the kept (paused) steps become the new `plan`. The reply is decided by what ran this turn, not by how many steps are kept. If exactly one step ran and it ended with `nil` or a pause, `Output` is its last message and no model is called; a carried `Re-plan` tombstone is not a step that ran and does not change this. Otherwise a summarizer prompt (`executiveSummarizerPrompt`, or `workInProcessSummarizerPrompt` when steps are still pending) merges the summaries into one reply with another `LLMCompletionState` call, made through a named state, `summarize`, whose id is the executive's with `-summarize` appended, so its begin and end ride the trace like any state's. Both prompts open with the interpolated `Preamble`. The finished-plan prompt carries a transcript of `messages`, one `role: content` line per message, then the summaries; the work-in-process prompt asks only to rephrase the summaries as a single question or statement. The state is called on a one-message list, `*messages.LastMessage()`, so the model sees the system prompt and the user's last message. If that call fails, `Execute` leaves `Output` empty and returns the state's `*ErrorSignal`; it never substitutes the user's message for a reply. `Execute` returns `nil` whenever `Output` holds a reply.
 
 ### `Call` and `RunLoop` are twins
 
-Both methods run the same turn: if `plan` is empty, call `Plan`; otherwise append the new user message to each pending step's `Messages`, without planning. Then `Execute`. Then append `Output` to the transcript as an assistant-role message. Apart from its trace envelope, that is the whole of `Call`: it works on the list it is given, never touches `History`, returns the appended list, and always returns `nil` as its signal, whatever happened inside. It is the executive as a nested behavior, and it is what `examples/oneshot` and `examples/snapshot-simple` use, one turn per process. `RunLoop(ctx, channel)` wraps the same dance in `for { Receive; …; Send }` over a `Channel`: it appends what `Receive` returned to `e.History`, runs the turn on `e.History`, appends `Output` to it, and sends `Output` back with the inbound message's `Id`. It returns only when `Receive` or `Send` returns an error, which `TerminalChannel` never does (Chapter 1).
+Both methods run the same turn: if `plan` is empty, call `Plan`; otherwise append the new user message to each pending step's `Messages`, without planning. Then `Execute`. Then append `Output` to the transcript as an assistant-role message. Apart from its trace envelope, that is the whole of `Call`: it works on the list it is given, never touches `History`, and returns the appended list and `nil`. When `Execute` reports a failure, `Call` returns the list it was given, with nothing appended, and that `*ErrorSignal`, and its `end_call` carries the error; a pause inside is still not reported. It is the executive as a nested behavior, and it is what `examples/oneshot` and `examples/snapshot-simple` use, one turn per process. `RunLoop(ctx, channel)` wraps the same dance in `for { Receive; …; Send }` over a `Channel`: it appends what `Receive` returned to `e.History`, runs the turn on `e.History`, appends `Output` to it, and sends `Output` back with the inbound message's `Id`. It returns when `Receive` or `Send` returns an error, which `TerminalChannel` never does (Chapter 1), or when a turn produced no reply: its error wraps that failure (`errors.As` recovers the `*ErrorSignal`), `History` ends on the user's message as the turn left it, and nothing is sent, so a channel peer waiting on a reply to that message's `Id` is left waiting, and what to send it is the caller's decision.
 
 `History`, then, is the executive's transcript: user messages and outputs, in order. Each step's `Messages` is the model's view: the planner's direction, the tree's replies, and every later user message appended on resume. These are Chapter 2's two conversations, kept apart by these two methods.
 
@@ -204,11 +204,11 @@ Behaviors are matched by `Name()`, case-sensitively; `re-plan` is matched case-i
 ```
 
 ```admonish warning title="Sharp edge"
-`Copy()` on an executive dereferences `OutOfBoundsHandler` without a nil check and copies configuration only — not `History`, `plan` or `Output`. The Go core never calls it (only the Lua binding's `copy` can): `Behaviors` must hold trees, and `BehaviorTree.Copy` shares its nodes by pointer, so an executive wrapped in a tree is *shared* by every plan step and every turn, keeping its `plan` between them, and because `Call` always returns `nil`, a pause inside it never pauses the enclosing tree. Set `OutOfBoundsHandler` anyway, and do not nest an executive that pauses.
+`Copy()` on an executive dereferences `OutOfBoundsHandler` without a nil check and copies configuration only — not `History`, `plan` or `Output`. The Go core never calls it (only the Lua binding's `copy` can): `Behaviors` must hold trees, and `BehaviorTree.Copy` shares its nodes by pointer, so an executive wrapped in a tree is *shared* by every plan step and every turn, keeping its `plan` between them, and because `Call` never returns a pause signal (only `nil`, or an `*ErrorSignal` for a failed reply), a pause inside it never pauses the enclosing tree. Set `OutOfBoundsHandler` anyway, and do not nest an executive that pauses.
 ```
 
 ```admonish warning title="Sharp edge"
-`Output` is a side channel — `Execute` returns nothing and communicates by mutating it (the field carries the author's `FIXME`). Read it only immediately after `Execute`, or use `Call`, which appends it to the messages for you.
+`Output` is a side channel — `Execute` returns only a `Signal` and delivers the reply by mutating the field (which carries the author's `FIXME`). Read it only immediately after `Execute`, and check the signal, since a failed turn leaves it empty; or use `Call`, which appends it to the messages for you.
 ```
 
 ```admonish warning title="Sharp edge"
@@ -216,7 +216,7 @@ An empty `Preamble` is not empty in the prompt. `AnnotationTemplate.Parse("")` d
 ```
 
 ```admonish warning title="Sharp edge"
-The single-step shortcut tests `len(e.plan) == 1` on the *kept* plan — the paused steps. If one step finished and another paused in the same turn, the kept plan has one entry, the shortcut fires, and the finished step's output never reaches the user: it sits in the summaries list that the shortcut skips. Design around it: do not mix a pausing behavior with a completing one in the same request unless losing the completed output is acceptable. The exception is a plan that ended in `Re-plan`: the tombstone makes two entries and the summarizer sees both outputs.
+`Execute` returns its failure as a signal, but the Lua engine's `Execute` binding (`engine/lua_planner.go`) discards it and its `Output` getter reads the field unchanged, so a Lua script sees an empty reply where Go sees an `*ErrorSignal`.
 ```
 
 ```admonish warning title="Sharp edge"
@@ -239,18 +239,18 @@ Chapter 2 asked you to read it twice. Here is the second reading, in the vocabul
 
 **Step 4 — The tree walks its states.** `BehaviorTree.Call` finds an empty `State` stack, pushes `Graph.Initial()`, which is `chatState`, and resets `Traversed`. `chatState` sends the direction to `gpt-4o-mini`, appends the reply, and returns `nil`; the tree pushes `pauseState`, pops it, and gets a `*CollectUserInputSignal`, so it pushes the pause state's children (there are none) and returns the messages and the signal with the stack still empty.
 
-**Step 5 — Execute decides the reply.** Triage matches `*CollectUserInputSignal`: the step is kept in the new `plan` and its last message joins the summaries. The kept plan has one entry, so the single-step shortcut sets `Output` to that message, resets `planDepth`, and returns without a summarizer call.
+**Step 5 — Execute decides the reply.** Triage matches `*CollectUserInputSignal`: the step is kept in the new `plan` and its last message joins the summaries. One step ran and it paused, so `Execute` sets `Output` to that message, resets `planDepth`, and returns `nil` without a summarizer call.
 
 **Step 6 — Send.** `RunLoop` appends `Output` to `e.History` as an assistant-role message and calls `Channel.Send`; `TerminalChannel` prints `[Assistant Response]` and the text. `History` holds two messages, `plan` holds one paused step, and `RunLoop` returns to `Receive`.
 
-**Step 7 — The next turn.** Your second message is appended to `e.History`, but `len(e.plan)` is one, so `Plan` is skipped and `RunLoop` appends `e.History.LastMessage()` to `step.Messages` instead. `Execute` calls the same tree copy; its stack is empty, so `BehaviorTree.Call` restarts from `chatState` on the three-message list, `pauseState` pauses again, the step is kept again, and the shortcut sets `Output` again.
+**Step 7 — The next turn.** Your second message is appended to `e.History`, but `len(e.plan)` is one, so `Plan` is skipped and `RunLoop` appends `e.History.LastMessage()` to `step.Messages` instead. `Execute` calls the same tree copy; its stack is empty, so `BehaviorTree.Call` restarts from `chatState` on the three-message list, `pauseState` pauses again, the step is kept again, and, as the only step that ran, its reply is `Output` again.
 
 Everything on that page is now something you have built or read.
 
 ```admonish example title="Recap"
 - The executive holds a flat list of behaviors; a planning LLM picks steps by **name** and writes each a **direction**.
 - Steps run concurrently on `Copy()`s; signals decide whether a step is summarized, kept for next turn, or reported as an error.
-- One paused step → its last message is the reply; otherwise a summarizer call merges results.
+- One step ran and finished or paused → its last message is the reply, as written; anything else → a summarizer call merges the summaries. A failed reply call comes back as a signal, never as an echo of the user.
 - `Call` and `RunLoop` are the same turn; `RunLoop` adds the channel loop.
 - `BehaviorName`/`BehaviorDescription` and `Preamble` are the interface to the planner. Always set `OutOfBoundsHandler` and a `Preamble`.
 ```
