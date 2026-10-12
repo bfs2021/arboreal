@@ -731,3 +731,20 @@ func TestCallAppendsTheReply(t *testing.T) {
 		t.Fatalf("Call returned %d messages ending %q, want the input plus the reply", len(out), out.LastMessage().Content)
 	}
 }
+
+func TestRunLoopReturnsTheFailure(t *testing.T) {
+	noModel(t)
+	exec := twoFinishingSteps(t)
+
+	err := exec.RunLoop(modelCtx(), &oneShotChannel{})
+
+	if err == nil {
+		t.Fatal("RunLoop returned nil, want the summarizer's failure")
+	}
+	if !strings.Contains(err.Error(), "OPENAI_TOKEN") {
+		t.Fatalf("RunLoop error = %q, want it to name the missing token", err)
+	}
+	if n := len(exec.History); n != 1 || exec.History.LastMessage().Role != llm.ChatMessageRoleUser {
+		t.Fatalf("History holds %d messages, want only the user's turn: no empty reply must be appended", n)
+	}
+}
