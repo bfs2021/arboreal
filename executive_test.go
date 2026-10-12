@@ -453,8 +453,15 @@ func seedPlan(t *testing.T, exec *TodoListExecutive, treeIDs ...string) {
 	}
 }
 
-// drainTrace runs fn with a trace channel on the context and returns every
-// message the turn sent, in order.
+// modelCtx carries an explicit default model, so a state whose Model is
+// empty resolves to the OpenAI provider and, with no token, fails there,
+// whatever becomes of the transitional fallback model.
+func modelCtx() context.Context {
+	return WithDefaultModel(context.Background(), llm.GPT4oMini)
+}
+
+// drainTrace runs fn with a trace channel and the default model on the
+// context and returns every message the turn sent, in order.
 func drainTrace(fn func(ctx context.Context)) []*TraceMessage {
 	trace := make(Trace)
 	var got []*TraceMessage
@@ -465,7 +472,7 @@ func drainTrace(fn func(ctx context.Context)) []*TraceMessage {
 		}
 		close(done)
 	}()
-	ctx := context.WithValue(context.Background(), "arboreal_trace", trace) //nolint:staticcheck // the framework reads this string key
+	ctx := context.WithValue(modelCtx(), "arboreal_trace", trace) //nolint:staticcheck // the framework reads this string key
 	fn(ctx)
 	close(trace)
 	<-done
@@ -562,10 +569,33 @@ func TestExecuteSummarizerFailureSurfaces(t *testing.T) {
 	if end == nil {
 		t.Fatal("no end_call named summarize on the trace: the summarizer is not called through the traced wrapper")
 	}
+	if end.ID != exec.Hash()+"-summarize" {
+		t.Fatalf("the summarize end_call has id %q, want the executive's with -summarize appended", end.ID)
+	}
 	if end.Error == nil {
 		t.Fatal("the summarize end_call carries no Error")
 	}
 	if end.Signal == nil || end.Signal.Type != "error" {
 		t.Fatalf("the summarize end_call signal = %+v, want type error", end.Signal)
+	}
+}
+
+func TestExecuteSummarizerFailureKeepsThePausedSteps(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "A asks"), pausingTree("tree-b", "B asks"))
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	sig := exec.Execute(modelCtx(), userTurn())
+
+	// Two steps paused, so the work-in-process summarizer runs and fails.
+	// The failed turn still stores the paused steps for the next turn.
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Execute returned %T (%v), want *ErrorSignal from the summarizer", sig, sig)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty", exec.Output)
+	}
+	if n := len(exec.plan); n != 2 {
+		t.Fatalf("plan holds %d steps, want the 2 paused ones", n)
 	}
 }

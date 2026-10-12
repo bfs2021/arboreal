@@ -549,6 +549,7 @@ final:
 		Id:          e.Hash() + "-summarize",
 		Name:        "summarize",
 		Description: "Writes the turn's reply from the steps' results",
+		ClientID:    e.ClientID,
 		System:      buf.String(),
 	})
 	m, sig := summarize.Call(ctx, AnnotatedMessages{
