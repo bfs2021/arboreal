@@ -37,7 +37,7 @@ One corner carries over from Chapter 8: `Execute` with an empty plan is not a no
 {{#include ../../../examples/one-turn/main.go:build}}
 ```
 
-`turn` is one message's worth of work: append the user's words to the transcript we own, run `Call` once, hand back the transcript with the reply appended. `Call`'s signal is always `nil`, so it is dropped:
+`turn` is one message's worth of work: append the user's words to the transcript we own, run `Call` once, hand back the transcript with the reply appended. `Call`'s signal is `nil` whenever the turn produced a reply; a failed reply comes back as an `*ErrorSignal` with the transcript unchanged, and this demo lets that stand, so a failed turn would print a user message with no reply after it:
 
 ```go
 {{#include ../../../examples/one-turn/main.go:turn}}
@@ -87,7 +87,9 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			}
 		}
 
-		e.Execute(ctx, e.History)
+		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
+			return fmt.Errorf("arboreal: the turn produced no reply: %w", sig)
+		}
 
 		e.History = AppendToMessages(e.History, llm.ChatCompletionMessage{
 			Role:    llm.ChatMessageRoleAssistant,
@@ -105,7 +107,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 }
 ```
 
-Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`; append `Output` to `History`; send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
+Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`, and if it reports a failed reply, return it as the loop's error, with `History` ending on the user's message and nothing sent; otherwise append `Output` to `History`; send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
 
 The `Channel` interface — `AllocateID`, `Send`, `Receive` in `channel.go` — exists for this loop style, and the framework ships two implementations: the `TerminalChannel` you have been typing into, and `TwilioSMSChannel`, which buffers webhook posts into a Go channel so that `Receive` has something to block on. This book does not cover them further.
 
@@ -124,7 +126,7 @@ Calling `Plan` on an executive with a plan in flight destroys the plan: its firs
 ```
 
 ```admonish warning title="Sharp edge"
-`Call` always returns `nil` as its signal, even when a step paused inside. From the outside you cannot ask "is this conversation waiting on the user?" — the snapshot is how you find out (Chapter 10).
+`Call` returns `nil` for every turn that produced a reply, even when a step paused inside; only a failed reply comes back as an `*ErrorSignal`, with the list unchanged, so a caller that drops the signal and reads the last message reads the user's own words on that turn. From the outside you still cannot ask "is this conversation waiting on the user?" — the snapshot is how you find out (Chapter 10).
 ```
 
 ## Back to the trace
