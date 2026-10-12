@@ -40,7 +40,7 @@ Run it with `go run ./examples/oneshot`; it needs `OPENAI_TOKEN` and exits on it
 The capital of France is Paris. It's known for its rich history, art, culture, and landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral.
 ```
 
-Two model calls: the planner and the tree's one state. One step ran, so its reply comes back as written; the summarizer only runs to merge two or more. Note what the example does not set: no `Preamble` and no `OutOfBoundsHandler`. Both omissions are sharp edges below.
+Two model calls: the planner and the tree's one state. One step ran and finished, so its reply comes back as written; the summarizer runs only when there is something to merge: two or more steps, or a lone step that failed. Note what the example does not set: no `Preamble` and no `OutOfBoundsHandler`. Both omissions are sharp edges below.
 
 ### Choosing between behaviors
 
@@ -173,7 +173,7 @@ Each step's `name` is then looked up in `behaviorLookup`, a map built from `Beha
 
 ### `Call` and `RunLoop` are twins
 
-Both methods run the same turn: if `plan` is empty, call `Plan`; otherwise append the new user message to each pending step's `Messages`, without planning. Then `Execute`. Then append `Output` to the transcript as an assistant-role message. Apart from its trace envelope, that is the whole of `Call`: it works on the list it is given, never touches `History`, and returns the appended list and `nil`. When `Execute` reports a failure, `Call` returns the list it was given, with nothing appended, and that `*ErrorSignal`, and its `end_call` carries the error; a pause inside is still not reported. It is the executive as a nested behavior, and it is what `examples/oneshot` and `examples/snapshot-simple` use, one turn per process. `RunLoop(ctx, channel)` wraps the same dance in `for { Receive; …; Send }` over a `Channel`: it appends what `Receive` returned to `e.History`, runs the turn on `e.History`, appends `Output` to it, and sends `Output` back with the inbound message's `Id`. It returns when `Receive` or `Send` returns an error, which `TerminalChannel` never does (Chapter 1), or when a turn produced no reply: that failure is its error, `History` ends on the user's message as the turn left it, and nothing is sent, so a channel peer waiting on a reply to that message's `Id` is left waiting, and what to send it is the caller's decision.
+Both methods run the same turn: if `plan` is empty, call `Plan`; otherwise append the new user message to each pending step's `Messages`, without planning. Then `Execute`. Then append `Output` to the transcript as an assistant-role message. Apart from its trace envelope, that is the whole of `Call`: it works on the list it is given, never touches `History`, and returns the appended list and `nil`. When `Execute` reports a failure, `Call` returns the list it was given, with nothing appended, and that `*ErrorSignal`, and its `end_call` carries the error; a pause inside is still not reported. It is the executive as a nested behavior, and it is what `examples/oneshot` and `examples/snapshot-simple` use, one turn per process. `RunLoop(ctx, channel)` wraps the same dance in `for { Receive; …; Send }` over a `Channel`: it appends what `Receive` returned to `e.History`, runs the turn on `e.History`, appends `Output` to it, and sends `Output` back with the inbound message's `Id`. It returns when `Receive` or `Send` returns an error, which `TerminalChannel` never does (Chapter 1), or when a turn produced no reply: its error wraps that failure (`errors.As` recovers the `*ErrorSignal`), `History` ends on the user's message as the turn left it, and nothing is sent, so a channel peer waiting on a reply to that message's `Id` is left waiting, and what to send it is the caller's decision.
 
 `History`, then, is the executive's transcript: user messages and outputs, in order. Each step's `Messages` is the model's view: the planner's direction, the tree's replies, and every later user message appended on resume. These are Chapter 2's two conversations, kept apart by these two methods.
 
@@ -204,11 +204,11 @@ Behaviors are matched by `Name()`, case-sensitively; `re-plan` is matched case-i
 ```
 
 ```admonish warning title="Sharp edge"
-`Copy()` on an executive dereferences `OutOfBoundsHandler` without a nil check and copies configuration only — not `History`, `plan` or `Output`. The Go core never calls it (only the Lua binding's `copy` can): `Behaviors` must hold trees, and `BehaviorTree.Copy` shares its nodes by pointer, so an executive wrapped in a tree is *shared* by every plan step and every turn, keeping its `plan` between them, and because `Call` always returns `nil`, a pause inside it never pauses the enclosing tree. Set `OutOfBoundsHandler` anyway, and do not nest an executive that pauses.
+`Copy()` on an executive dereferences `OutOfBoundsHandler` without a nil check and copies configuration only — not `History`, `plan` or `Output`. The Go core never calls it (only the Lua binding's `copy` can): `Behaviors` must hold trees, and `BehaviorTree.Copy` shares its nodes by pointer, so an executive wrapped in a tree is *shared* by every plan step and every turn, keeping its `plan` between them, and because `Call` never returns a pause signal (only `nil`, or an `*ErrorSignal` for a failed reply), a pause inside it never pauses the enclosing tree. Set `OutOfBoundsHandler` anyway, and do not nest an executive that pauses.
 ```
 
 ```admonish warning title="Sharp edge"
-`Output` is a side channel — `Execute` returns nothing and communicates by mutating it (the field carries the author's `FIXME`). Read it only immediately after `Execute`, or use `Call`, which appends it to the messages for you.
+`Output` is a side channel — `Execute` returns only a `Signal` and delivers the reply by mutating the field (which carries the author's `FIXME`). Read it only immediately after `Execute`, and check the signal, since a failed turn leaves it empty; or use `Call`, which appends it to the messages for you.
 ```
 
 ```admonish warning title="Sharp edge"
@@ -250,7 +250,7 @@ Everything on that page is now something you have built or read.
 ```admonish example title="Recap"
 - The executive holds a flat list of behaviors; a planning LLM picks steps by **name** and writes each a **direction**.
 - Steps run concurrently on `Copy()`s; signals decide whether a step is summarized, kept for next turn, or reported as an error.
-- One step ran → its last message is the reply, as written; two or more → a summarizer call merges them. A failed reply call comes back as a signal, never as an echo of the user.
+- One step ran and finished or paused → its last message is the reply, as written; anything else → a summarizer call merges the summaries. A failed reply call comes back as a signal, never as an echo of the user.
 - `Call` and `RunLoop` are the same turn; `RunLoop` adds the channel loop.
 - `BehaviorName`/`BehaviorDescription` and `Preamble` are the interface to the planner. Always set `OutOfBoundsHandler` and a `Preamble`.
 ```
