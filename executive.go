@@ -352,6 +352,56 @@ done:
 	return result
 }
 
+// turnOutcome is one turn's results sorted: the steps kept for the next
+// turn, what the summarizer would merge, and whether one step's last message
+// can stand as the reply on its own.
+type turnOutcome struct {
+	// Kept is the paused steps, in result order.
+	Kept []*ExecGeneratedStep
+	// Summaries is every step's last message, finished steps first in
+	// completion order and then the paused ones; a failed step contributes
+	// "Error occurred: " and its error.
+	Summaries []string
+	// Verbatim is the reply when exactly one step ran and it ended with nil
+	// or a pause; HasReply says whether it is set.
+	Verbatim string
+	HasReply bool
+}
+
+// triage sorts the results of the steps that ran this turn. A nil signal is
+// a finished step and an *ErrorSignal a failed one: both contribute a
+// summary and neither is kept. A *CollectUserInputSignal is a paused step:
+// kept, and its last message is a summary too. Any other signal is a leaked
+// skip and contributes nothing. The reply is decided by what ran, not by
+// how many steps are kept: when exactly one step ran and it finished or
+// paused, its last message is the reply as written.
+func triage(results []PlanResult) turnOutcome {
+	var out turnOutcome
+	var paused []PlanResult
+	for _, result := range results {
+		switch t := result.Signal.(type) {
+		case *ErrorSignal:
+			out.Summaries = append(out.Summaries, "Error occurred: "+t.Error())
+		case *CollectUserInputSignal:
+			paused = append(paused, result)
+		case nil:
+			out.Summaries = append(out.Summaries, result.Messages.LastMessage().Content)
+		}
+	}
+	for _, result := range paused {
+		out.Kept = append(out.Kept, result.Step)
+		out.Summaries = append(out.Summaries, result.Messages.LastMessage().Content)
+	}
+	if len(results) == 1 {
+		switch results[0].Signal.(type) {
+		case nil, *CollectUserInputSignal:
+			out.Verbatim = results[0].Messages.LastMessage().Content
+			out.HasReply = true
+		}
+	}
+	return out
+}
+
 var executiveSummarizerPrompt = `{{ .Preamble }}
 
 Given the following chat transcript:

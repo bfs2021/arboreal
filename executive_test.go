@@ -268,3 +268,100 @@ func TestFixJSONUsesTheGivenModel(t *testing.T) {
 		t.Fatalf("err = %v, want it to route on the given model URI", err)
 	}
 }
+
+// planResult is one step's result for triage: the signal it ended with and
+// the last message its behavior left.
+func planResult(sig Signal, last string) PlanResult {
+	return PlanResult{
+		Step: &ExecGeneratedStep{},
+		Messages: AnnotatedMessages{{ChatCompletionMessage: llm.ChatCompletionMessage{
+			Role: llm.ChatMessageRoleAssistant, Content: last,
+		}}},
+		Signal: sig,
+	}
+}
+
+func TestTriage(t *testing.T) {
+	finished := func(last string) PlanResult { return planResult(nil, last) }
+	paused := func(last string) PlanResult { return planResult(&CollectUserInputSignal{Reason: "wait"}, last) }
+	failed := func(last string) PlanResult { return planResult(&ErrorSignal{ErrorMessage: "boom"}, last) }
+	skipped := func(last string) PlanResult { return planResult(&SkipSignal{Reason: "leaked"}, last) }
+
+	cases := []struct {
+		name          string
+		results       []PlanResult
+		wantKept      int
+		wantSummaries []string
+		wantReply     string
+		wantHasReply  bool
+	}{
+		{
+			name:          "one finished step replies as written",
+			results:       []PlanResult{finished("A")},
+			wantSummaries: []string{"A"},
+			wantReply:     "A",
+			wantHasReply:  true,
+		},
+		{
+			name:          "one paused step replies as written and is kept",
+			results:       []PlanResult{paused("A?")},
+			wantKept:      1,
+			wantSummaries: []string{"A?"},
+			wantReply:     "A?",
+			wantHasReply:  true,
+		},
+		{
+			name:          "one failed step is summarized, not replied",
+			results:       []PlanResult{failed("A")},
+			wantSummaries: []string{"Error occurred: boom"},
+		},
+		{
+			name:          "a finished step beside a paused one: both summarized, paused kept",
+			results:       []PlanResult{finished("A"), paused("B?")},
+			wantKept:      1,
+			wantSummaries: []string{"A", "B?"},
+		},
+		{
+			name:          "a paused step before a finished one: finished is summarized first",
+			results:       []PlanResult{paused("A?"), finished("B")},
+			wantKept:      1,
+			wantSummaries: []string{"B", "A?"},
+		},
+		{
+			name:          "a paused step before a failed one: the error is summarized first",
+			results:       []PlanResult{paused("A?"), failed("B")},
+			wantKept:      1,
+			wantSummaries: []string{"Error occurred: boom", "A?"},
+		},
+		{
+			name:          "two paused steps are both kept",
+			results:       []PlanResult{paused("A?"), paused("B?")},
+			wantKept:      2,
+			wantSummaries: []string{"A?", "B?"},
+		},
+		{
+			name:          "two finished steps are both summarized, none kept",
+			results:       []PlanResult{finished("A"), finished("B")},
+			wantSummaries: []string{"A", "B"},
+		},
+		{
+			name:    "a leaked skip contributes nothing",
+			results: []PlanResult{skipped("A")},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := triage(tc.results)
+			if len(got.Kept) != tc.wantKept {
+				t.Fatalf("kept %d steps, want %d", len(got.Kept), tc.wantKept)
+			}
+			if strings.Join(got.Summaries, "|") != strings.Join(tc.wantSummaries, "|") {
+				t.Fatalf("summaries = %q, want %q", got.Summaries, tc.wantSummaries)
+			}
+			if got.HasReply != tc.wantHasReply || got.Verbatim != tc.wantReply {
+				t.Fatalf("reply = (%q, %v), want (%q, %v)", got.Verbatim, got.HasReply, tc.wantReply, tc.wantHasReply)
+			}
+		})
+	}
+}
