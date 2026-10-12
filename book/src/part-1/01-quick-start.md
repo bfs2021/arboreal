@@ -69,7 +69,7 @@ graph LR
 
 `arboreal.CreateTodoListExecutive(name, description, &chatBehavior)` returns the **executive**: the thing that owns the conversation, decides which trees to run for a request, and runs them; messages that arrive while a tree is waiting on the user go to that tree. Here it has exactly one tree to choose from.
 
-`exec.RunLoop(ctx, arboreal.TerminalChannel{})` is the **run loop**: receive a message from a **channel** (here, the terminal), run the executive, send the reply back, repeat. `TerminalChannel` is what printed `[User Message]` and `[Assistant Response]`; those labels come from the channel, not from the executive or the model. The loop returns only on error — and `TerminalChannel` never produces one (the first sharp edge below), so `RunLoop` never returns, the closing `panic(err)` is never reached, and the only way out is Ctrl-C.
+`exec.RunLoop(ctx, arboreal.TerminalChannel{})` is the **run loop**: receive a message from a **channel** (here, the terminal), run the executive, send the reply back, repeat. `TerminalChannel` is what printed `[User Message]` and `[Assistant Response]`; those labels come from the channel, not from the executive or the model. The loop returns only on error. `TerminalChannel` never produces one (the first sharp edge below), so in practice `RunLoop` returns, and the closing `panic(err)` fires, only when a turn fails to produce a reply (Chapter 8); otherwise the only way out is Ctrl-C.
 
 ```admonish warning title="Sharp edge"
 `TerminalChannel.Receive` in `channel.go` never returns an error — not even at end of input. If you press Ctrl-D, the loop receives an empty message, runs it through the executive (one model call), prints the reply, and prompts again. Ctrl-D does not end the session; quit with Ctrl-C.
