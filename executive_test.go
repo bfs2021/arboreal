@@ -421,6 +421,7 @@ func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
 	}
 	exec := CreateTodoListExecutiveWithId("reply exec", "exercises the reply path", "exec-reply", behaviors...)
 	exec.Preamble = "You are a test executive."
+	exec.ClientID = "client-reply"
 	exec.OutOfBoundsHandler = CannedResponseState("out of bounds")
 	return exec
 }
@@ -523,6 +524,9 @@ func TestExecuteOutOfBoundsFailureSurfaces(t *testing.T) {
 	if exec.planDepth != 0 {
 		t.Fatalf("planDepth = %d after the turn, want 0", exec.planDepth)
 	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a failed handler, want 0", n)
+	}
 }
 
 func TestExecuteOutOfBoundsHandlerReplies(t *testing.T) {
@@ -577,6 +581,9 @@ func TestExecuteSummarizerFailureSurfaces(t *testing.T) {
 	}
 	if end.ID != exec.Hash()+"-summarize" {
 		t.Fatalf("the summarize end_call has id %q, want the executive's with -summarize appended", end.ID)
+	}
+	if end.ClientID != exec.ClientID {
+		t.Fatalf("the summarize end_call has client id %q, want the executive's %q", end.ClientID, exec.ClientID)
 	}
 	if end.Error == nil {
 		t.Fatal("the summarize end_call carries no Error")

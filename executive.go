@@ -358,9 +358,9 @@ done:
 type turnOutcome struct {
 	// Kept is the paused steps, in result order.
 	Kept []*ExecGeneratedStep
-	// Summaries is every step's last message, finished steps first in
-	// completion order and then the paused ones; a failed step contributes
-	// "Error occurred: " and its error.
+	// Summaries is the last message of every finished, failed or paused
+	// step, finished steps first in completion order and then the paused
+	// ones; a failed step contributes "Error occurred: " and its error.
 	Summaries []string
 	// Verbatim is the reply when exactly one step ran and it ended with nil
 	// or a pause; HasReply says whether it is set.
@@ -427,10 +427,12 @@ Rephrase the following statements or questions as a single question or statement
 `
 
 // Execute runs the plan and decides the turn's reply. It writes e.Output
-// and e.plan and returns a Signal: nil when Output holds the reply, the
-// *ErrorSignal of the out-of-bounds handler or of the summarizer when the
-// call that was to write the reply failed. On failure Output is empty and
-// e.plan holds the kept steps as a successful turn would have stored them.
+// and e.plan (and, on a re-plan, rewrites the last message of messages with
+// the direction and the summaries) and returns a Signal: nil when Output
+// holds the reply, the *ErrorSignal of the out-of-bounds handler or of the
+// summarizer when the call that was to write the reply failed. On failure
+// Output is empty and e.plan holds the kept steps as a successful turn would
+// have stored them.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
 		// A turn that ends here ends like any other: the re-plan depth
