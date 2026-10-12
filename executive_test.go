@@ -370,7 +370,8 @@ func TestTriage(t *testing.T) {
 // noModel makes the test hermetic: with both tokens empty, any model call
 // the framework makes fails, and a failed reply call is returned as a
 // signal rather than swallowed. captureLog silences the fallback-model
-// warning that the summarizer's unresolved Model triggers.
+// warning that a state reached with no default model on the context
+// would log.
 func noModel(t *testing.T) {
 	t.Helper()
 	t.Setenv("OPENAI_TOKEN", "")
@@ -605,6 +606,8 @@ func TestExecuteLoneFinishedStepRepliesAsWritten(t *testing.T) {
 	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))
 	seedPlan(t, exec, "tree-a")
 
+	// No default model on the context, on purpose: this path must reach no
+	// model, and if it did, the call would fail either way.
 	sig := exec.Execute(context.Background(), userTurn())
 
 	if sig != nil {
@@ -658,5 +661,27 @@ func TestExecuteFinishedStepBesidePausedIsSummarized(t *testing.T) {
 	}
 	if n := len(exec.plan); n != 1 || exec.plan[0].Behavior.Hash() != "tree-b" {
 		t.Fatalf("kept plan = %d steps, want the one paused step on tree-b", n)
+	}
+}
+
+func TestExecuteLonePausedStepBesideTombstoneRepliesAsWritten(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "the question, as written"))
+	seedPlan(t, exec, "tree-a")
+	// A plan that ended in Re-plan carries a tombstone after its last step.
+	// seedPlan cannot seed one, since a tombstone references no behavior,
+	// so it is appended by hand.
+	exec.plan = append(exec.plan, &ExecGeneratedStep{ReplanTombstone: true, Messages: AnnotatedMessages{}})
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "the question, as written" {
+		t.Fatalf("Output = %q, want the paused step's own last message: a carried tombstone is not a step that ran", exec.Output)
+	}
+	if n := len(exec.plan); n != 2 || !exec.plan[1].ReplanTombstone {
+		t.Fatalf("kept plan = %d steps, want the paused step and the carried tombstone", n)
 	}
 }
