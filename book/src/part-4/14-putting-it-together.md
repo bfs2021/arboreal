@@ -124,7 +124,7 @@ bookshelf-transcript.json
 $ go run ./examples/bookshelf "Yes, go ahead."
 (a question is pending — resuming the paused task)
 
-Bookshelf: The customer said: "Yes, go ahead.". Done — the book is on hold at the counter for three days.
+Bookshelf: Done — the book is on hold at the counter for three days.
 
 $ ls bookshelf-*.json
 bookshelf-transcript.json
@@ -193,12 +193,12 @@ Bookshelf: I can put that title on hold at the counter for three days. Should I 
 
 $ go run ./examples/bookshelf "Yes, go ahead."
 
-Bookshelf: The customer said: "Yes, go ahead.". Done — the book is on hold at the counter for three days.
+Bookshelf: Done — the book is on hold at the counter for three days.
 ```
 
 Each run took a different path through the machinery. The greeting fits none of the three behaviors, so the `Preamble`'s escape clause produced an empty plan and the reply is the `OutOfBoundsHandler`'s canned sentence, with no tree and no summarizer between it and stdout. The second run is the annotation pipeline: `extract-genre` pinned the genre onto the customer's message, `recommend` read it back through `ExtraContext`, and its reply is what you read — *Dune*, a title the store's catalog never lists, because nothing in `recommend_book` ever sees the catalog. The third is the tool round — the count and the price match the catalog row exactly, which is the point of a state told to answer from the tool's result and never to guess. The fourth and fifth are the pause, across two processes.
 
-Runs 2, 3 and 5 are each one step that finished, so each reply is its state's own last message, as written. The `The customer said: …` preface that the `Preamble` asks for shows only in the planner's directions, which these replies no longer pass through. It would show again on a turn where two or more steps ran and the summarizer merged them, because `interpolatedPreamble` is the first line of the summarizer prompts as well as the planner prompt (Chapter 8). That is still worth knowing: the `Preamble` is the executive's voice wherever the executive itself writes the reply.
+Runs 2, 3 and 5 are each one step that finished, so each reply is its state's own last message, as written. On these runs the `The customer said: …` preface that the `Preamble` asks for shows only in the planner's directions; the summarizer prompt, which also opens with it, is a path these replies no longer take. It would show again on a turn where two or more steps ran and the summarizer merged them, because `interpolatedPreamble` is the first line of the summarizer prompts as well as the planner prompt (Chapter 8). That is still worth knowing: the `Preamble` is the executive's voice wherever the executive itself writes the reply.
 
 Every one of those five runs began with nothing in memory. The two files did all the remembering.
 
@@ -212,7 +212,7 @@ The hold tree was built model-free so that a test could reach it, and both halve
 {{#include ../../../examples/bookshelf/main_test.go:exec-roundtrip}}
 ```
 
-It asserts the question on the pausing turn, `holdPlaced` on the finishing one, and an empty snapshot after it. Its first line, `t.Setenv("OPENAI_TOKEN", "")`, is an assertion in disguise rather than housekeeping: nothing in this test should reach a model, and if something did, the call would fail without a token and `Call` would return the failure instead of a reply, which the next assertion catches. With a token in the environment the same mistake would pass by spending one.
+It asserts the question on the pausing turn, `holdPlaced` on the finishing one, and an empty snapshot after it. Its first line, `t.Setenv("OPENAI_TOKEN", "")`, is an assertion in disguise rather than housekeeping: nothing in this test should reach a model, and if something did, the call would fail without a token and `Call` would return the failure instead of a reply, which the next assertion catches. With a token in the environment the same mistake could pass by spending one.
 
 ```go
 {{#include ../../../examples/bookshelf/main_test.go:tree-roundtrip}}

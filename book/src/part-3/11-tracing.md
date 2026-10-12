@@ -86,5 +86,5 @@ Set the eight lines against Chapter 2's numbered steps. The executive's envelope
 ```admonish example title="Recap"
 - `Trace` is `chan *TraceMessage` under the context key `"arboreal_trace"`.
 - Drain it or deadlock; nil is a safe no-op.
-- Name your states or their lines are anonymous; signals ride the state's and the tree's `end_call`, never the executive's; `Operations` never carries a history change.
+- Name your states or their lines are anonymous; signals ride the state's and the tree's `end_call`, and the executive's only when the turn produced no reply; `Operations` never carries a history change.
 ```
