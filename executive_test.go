@@ -33,11 +33,16 @@ func (b *ctxCapturingBehavior) Call(ctx context.Context, messages AnnotatedMessa
 // oneShotChannel delivers a single user message and then reports EOF, so
 // RunLoop processes exactly one turn and then exits its loop.
 type oneShotChannel struct {
-	sent bool
+	sent  bool
+	sends int // replies RunLoop sent; a failed turn must send none
 }
 
-func (c *oneShotChannel) AllocateID() string         { return "id" }
-func (c *oneShotChannel) Send(*ChannelMessage) error { return nil }
+func (c *oneShotChannel) AllocateID() string { return "id" }
+
+func (c *oneShotChannel) Send(*ChannelMessage) error {
+	c.sends++
+	return nil
+}
 
 func (c *oneShotChannel) Receive() (*ChannelMessage, error) {
 	if c.sent {
@@ -736,7 +741,8 @@ func TestRunLoopReturnsTheFailure(t *testing.T) {
 	noModel(t)
 	exec := twoFinishingSteps(t)
 
-	err := exec.RunLoop(modelCtx(), &oneShotChannel{})
+	ch := &oneShotChannel{}
+	err := exec.RunLoop(modelCtx(), ch)
 
 	if err == nil {
 		t.Fatal("RunLoop returned nil, want the summarizer's failure")
@@ -746,5 +752,12 @@ func TestRunLoopReturnsTheFailure(t *testing.T) {
 	}
 	if n := len(exec.History); n != 1 || exec.History.LastMessage().Role != llm.ChatMessageRoleUser {
 		t.Fatalf("History holds %d messages, want only the user's turn: no empty reply must be appended", n)
+	}
+	var es *ErrorSignal
+	if !errors.As(err, &es) {
+		t.Fatalf("RunLoop error %v does not wrap the turn's *ErrorSignal", err)
+	}
+	if ch.sends != 0 {
+		t.Fatalf("RunLoop sent %d replies on a failed turn, want none", ch.sends)
 	}
 }

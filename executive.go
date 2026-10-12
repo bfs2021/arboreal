@@ -666,7 +666,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 		}
 
 		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
-			return fmt.Errorf("arboreal: the turn produced no reply: %s", sig.ErrorMessage)
+			return fmt.Errorf("arboreal: the turn produced no reply: %w", sig)
 		}
 
 		e.History = AppendToMessages(e.History, llm.ChatCompletionMessage{
