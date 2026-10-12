@@ -433,6 +433,10 @@ Rephrase the following statements or questions as a single question or statement
 // e.plan holds the kept steps as a successful turn would have stored them.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
+		// A turn that ends here ends like any other: the re-plan depth
+		// starts fresh next turn.
+		e.planDepth = 0
+
 		if e.OutOfBoundsHandler == nil {
 			e.Output = "Please set an out-of-bounds handler, this request was unable to be planned."
 			return nil

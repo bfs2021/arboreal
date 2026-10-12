@@ -368,9 +368,9 @@ func TestTriage(t *testing.T) {
 }
 
 // noModel makes the test hermetic: with both tokens empty, any model call
-// the framework makes fails, and since Task 3 a failed reply call is
-// returned as a signal rather than swallowed. captureLog silences the
-// fallback-model warning that the summarizer's unresolved Model triggers.
+// the framework makes fails, and a failed reply call is returned as a
+// signal rather than swallowed. captureLog silences the fallback-model
+// warning that the summarizer's unresolved Model triggers.
 func noModel(t *testing.T) {
 	t.Helper()
 	t.Setenv("OPENAI_TOKEN", "")
@@ -449,7 +449,7 @@ func seedPlan(t *testing.T, exec *TodoListExecutive, treeIDs ...string) {
 		t.Fatal(err)
 	}
 	if n := len(exec.plan); n != len(treeIDs) {
-		t.Fatalf("seeded %d steps, want %d: a tree id does not match a behavior", n, len(treeIDs))
+		t.Fatalf("seeded %d steps, want %d: the executive's hash or the plan key is wrong", n, len(treeIDs))
 	}
 }
 
@@ -494,6 +494,7 @@ func TestExecuteOutOfBoundsFailureSurfaces(t *testing.T) {
 	}
 	// No plan seeded: Execute goes straight to the handler.
 
+	exec.planDepth = 1 // as if a re-plan had led here
 	sig := exec.Execute(context.Background(), userTurn())
 
 	es, ok := sig.(*ErrorSignal)
@@ -505,6 +506,9 @@ func TestExecuteOutOfBoundsFailureSurfaces(t *testing.T) {
 	}
 	if exec.Output != "" {
 		t.Fatalf("Output = %q, want empty: a failed handler must not reply with the user's words", exec.Output)
+	}
+	if exec.planDepth != 0 {
+		t.Fatalf("planDepth = %d after the turn, want 0", exec.planDepth)
 	}
 }
 
