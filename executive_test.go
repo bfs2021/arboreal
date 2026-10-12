@@ -599,3 +599,64 @@ func TestExecuteSummarizerFailureKeepsThePausedSteps(t *testing.T) {
 		t.Fatalf("plan holds %d steps, want the 2 paused ones", n)
 	}
 }
+
+func TestExecuteLoneFinishedStepRepliesAsWritten(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))
+	seedPlan(t, exec, "tree-a")
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil: one step ran, so no summarizer and no model", sig)
+	}
+	if exec.Output != "the reply, as written" {
+		t.Fatalf("Output = %q, want the step's own last message", exec.Output)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a finished turn, want 0", n)
+	}
+}
+
+func TestExecuteLonePausedStepRepliesAsWritten(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "the question, as written"))
+	seedPlan(t, exec, "tree-a")
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "the question, as written" {
+		t.Fatalf("Output = %q, want the step's own last message", exec.Output)
+	}
+	if n := len(exec.plan); n != 1 {
+		t.Fatalf("plan holds %d steps after a paused turn, want 1", n)
+	}
+}
+
+func TestExecuteFinishedStepBesidePausedIsSummarized(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A finished"), pausingTree("tree-b", "B asks"))
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	sig := exec.Execute(modelCtx(), userTurn())
+
+	// Two steps ran, so the reply is merged by the summarizer, which fails
+	// without a token. Before this change the paused step's text came back
+	// alone and the finished step's output was dropped.
+	es, ok := sig.(*ErrorSignal)
+	if !ok {
+		t.Fatalf("Execute returned %T (%v) with Output %q; want the summarizer's *ErrorSignal, not the paused step's text alone", sig, sig, exec.Output)
+	}
+	if !strings.Contains(es.ErrorMessage, "OPENAI_TOKEN") {
+		t.Fatalf("ErrorMessage = %q, want the missing-token error", es.ErrorMessage)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty", exec.Output)
+	}
+	if n := len(exec.plan); n != 1 || exec.plan[0].Behavior.Hash() != "tree-b" {
+		t.Fatalf("kept plan = %d steps, want the one paused step on tree-b", n)
+	}
+}

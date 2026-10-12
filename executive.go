@@ -468,35 +468,9 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 		info.Transcript += m.Role + ": " + m.Content + "\n"
 	}
 
-	var plan []*ExecGeneratedStep
-
-	var behaviorsToRetry []*ExecGeneratedStep
-	var collectResults []PlanResult
-
-	results := e.executePlan(ctx, e.plan)
-	for _, result := range results {
-		switch t := result.Signal.(type) {
-		case *ErrorSignal:
-			info.Summaries = append(info.Summaries, "Error occurred: "+t.Error())
-		case *CollectUserInputSignal:
-			collectResults = append(collectResults, result)
-		case nil:
-			info.Summaries = append(info.Summaries, result.Messages.LastMessage().Content)
-		}
-	}
-
-	if len(behaviorsToRetry) > 0 {
-		// TODO: Retry!
-		fmt.Println("would retry something here!")
-	}
-
-	if len(collectResults) > 0 {
-		for _, result := range collectResults {
-			plan = append(plan, result.Step)
-
-			info.Summaries = append(info.Summaries, result.Messages.LastMessage().Content)
-		}
-	}
+	outcome := triage(e.executePlan(ctx, e.plan))
+	info.Summaries = outcome.Summaries
+	plan := outcome.Kept
 
 	if e.plan[len(e.plan)-1].ReplanTombstone {
 		if len(plan) > 0 {
@@ -526,15 +500,18 @@ final:
 
 	e.plan = plan
 
-	var prompt = executiveSummarizerPrompt
+	// One step ran and it finished or paused: its last message is the reply
+	// as written, and no model is called. A carried Re-plan tombstone is not
+	// a step that ran. Otherwise the summarizer merges the summaries.
+	if outcome.HasReply {
+		e.Output = outcome.Verbatim
+		e.planDepth = 0
+		return nil
+	}
+
+	prompt := executiveSummarizerPrompt
 	if len(e.plan) > 0 {
 		prompt = workInProcessSummarizerPrompt
-
-		if len(e.plan) == 1 {
-			e.Output = e.plan[0].Messages.LastMessage().Content
-			e.planDepth = 0
-			return nil
-		}
 	}
 
 	var buf bytes.Buffer
