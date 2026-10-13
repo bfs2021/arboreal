@@ -45,6 +45,8 @@ book/book/
 examples/annotation-template/annotation-template
 /annotations-probe
 examples/annotations-probe/annotations-probe
+/bedrock
+examples/bedrock/bedrock
 /bookshelf
 examples/bookshelf/bookshelf
 /crm

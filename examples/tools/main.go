@@ -9,13 +9,16 @@
 // The final dump shows the whole exchange, tool messages included.
 //
 // Requires OPENAI_TOKEN to be set in the environment (the default model is
-// gpt-4o-mini via the OpenAI provider).
+// gpt-4o-mini via the OpenAI provider). Set BEDROCK_MODEL to a Bedrock model
+// or inference profile ID to run against AWS Bedrock instead (see
+// examples/bedrock for the AWS setup).
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -61,9 +64,16 @@ func main() {
 	ctx := arboreal.WithMCPClient(context.Background(), mux)
 	// ANCHOR_END: wiring
 
+	// An empty model means the default (gpt-4o-mini via OpenAI).
+	var model string
+	if m := os.Getenv("BEDROCK_MODEL"); m != "" {
+		model = llm.ProviderBedrock + ":" + m
+	}
+
 	// ANCHOR: call
 	state := arboreal.LLMCompletionState(arboreal.LLMCompletionOptions{
 		System:     "Answer using the tools available to you.",
+		Model:      model,
 		AllowTools: true,
 	})
 

@@ -5,7 +5,7 @@ Arboreal is a Go framework for building agentic AI systems using behavior trees 
 ## Features
 
 - **Behavior Trees**: Define complex AI behaviors using composable behavior trees
-- **LLM Integration**: Built-in support for OpenAI, Anthropic, and Ollama models
+- **LLM Integration**: Built-in support for OpenAI, Anthropic, AWS Bedrock, and Ollama models
 - **Planning & Execution**: TodoListExecutive for autonomous task planning and execution
 - **State Management**: Persistent state handling with snapshots and memory
 - **Vector Search**: SQLite-vec integration for semantic search and retrieval
@@ -100,7 +100,18 @@ Arboreal supports multiple LLM providers through environment variables:
 export OPENAI_TOKEN=your_openai_key
 export ANTHROPIC_TOKEN=your_anthropic_key
 export OLLAMA_SERVICE_URL=http://localhost:11434
+export AWS_REGION=us-east-1   # AWS Bedrock, plus credentials from the standard AWS chain
 ```
+
+To use a model from the AWS Bedrock catalog, prefix its model ID (or inference profile ID) with `bedrock:`:
+
+```go
+arboreal.LLMCompletionOptions{
+    Model: "bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0", // or llm.BedrockNovaLite
+}
+```
+
+Chat goes through the Bedrock Converse API, so any catalog model that supports Converse works; tool use requires a model that supports tools in Converse. Embeddings support Amazon Titan text embedding models (default `llm.BedrockTitanEmbedV2`).
 
 ## Advanced Features
 
@@ -152,6 +163,7 @@ func (c CustomChannel) Receive() (string, error) {
 | `OPENAI_TOKEN` | OpenAI API key | For OpenAI models |
 | `ANTHROPIC_TOKEN` | Anthropic API key | For Claude models |
 | `OLLAMA_SERVICE_URL` | Ollama service URL | For local models |
+| `AWS_REGION` / `AWS_PROFILE` | AWS region and credentials ([standard AWS configuration](https://docs.aws.amazon.com/sdkref/latest/guide/creds-config-files.html)) | For AWS Bedrock models |
 | `TWILIO_ACCOUNT_SID` | Twilio account SID | For SMS channel |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token | For SMS channel |
 
@@ -184,6 +196,7 @@ The `examples/` directory contains various use cases:
 - **Snapshot Edges** (`examples/snapshot-edges/`) - When a snapshot records the executive and when it does not; runs without any API token
 - **Bookshelf** (`examples/bookshelf/`) - The capstone: one process run per message, snapshots for a pause that outlives the process, an MCP catalog tool and a trace drain in one program
 - **Tools** (`examples/tools/`) - One MCP tool served in-process over the in-memory transport, one state with `AllowTools` calling it
+- **Bedrock** (`examples/bedrock/`) - One state answering through a model served by AWS Bedrock; requires AWS credentials instead of `OPENAI_TOKEN`
 - **Tools Limited** (`examples/tools-limited/`) - An MCP server exposing three tools and a state that offers the model exactly one of them via `Tools`; the rest stay out of the model's sight
 - **Chat Bot** (`examples/test/`) - Basic conversational agent
 - **CRM Assistant** (`examples/crm/`) - Customer relationship management

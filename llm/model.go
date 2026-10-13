@@ -13,6 +13,7 @@ const (
 	ProviderOpenAI    = "openai"
 	ProviderAnthropic = "anthropic"
 	ProviderOllama    = "ollama"
+	ProviderBedrock   = "bedrock"
 	ProviderCluster   = "cluster"
 
 	// Models
@@ -22,13 +23,21 @@ const (
 	ModelClaudeHaiku35    = "claude-3-5-haiku-20241022"
 	ModelChatModelLlama8b = "llama3.1:8b-instruct-q8_0"
 
+	// Bedrock model IDs. Some models are only invocable through a
+	// cross-region inference profile, whose ID carries a geography prefix
+	// (e.g. "us.anthropic.claude-...").
+	ModelBedrockNovaLite     = "amazon.nova-lite-v1:0"
+	ModelBedrockTitanEmbedV2 = "amazon.titan-embed-text-v2:0"
+
 	// Prebuilt URIs
-	GPT4oMini     = ProviderOpenAI + ":" + ModelGPT4oMini
-	GPT41Nano     = ProviderOpenAI + ":" + ModelGPT41Nano
-	ClaudeSonnet4 = ProviderAnthropic + ":" + ModelClaudeSonnet4
-	ClaudeSonnet  = ClaudeSonnet4
-	ClaudeHaiku35 = ProviderAnthropic + ":" + ModelClaudeHaiku35
-	ClaudeHaiku   = ClaudeHaiku35
+	GPT4oMini           = ProviderOpenAI + ":" + ModelGPT4oMini
+	GPT41Nano           = ProviderOpenAI + ":" + ModelGPT41Nano
+	ClaudeSonnet4       = ProviderAnthropic + ":" + ModelClaudeSonnet4
+	ClaudeSonnet        = ClaudeSonnet4
+	ClaudeHaiku35       = ProviderAnthropic + ":" + ModelClaudeHaiku35
+	ClaudeHaiku         = ClaudeHaiku35
+	BedrockNovaLite     = ProviderBedrock + ":" + ModelBedrockNovaLite
+	BedrockTitanEmbedV2 = ProviderBedrock + ":" + ModelBedrockTitanEmbedV2
 
 	// Custom Models
 	ChatModelScribeV1 = "scribe-v1"
@@ -61,7 +70,7 @@ func ParseModelURI(uri string) *ModelURI {
 	}
 
 	switch parts[0] {
-	case ProviderOpenAI, ProviderAnthropic, ProviderOllama, ProviderCluster:
+	case ProviderOpenAI, ProviderAnthropic, ProviderOllama, ProviderBedrock, ProviderCluster:
 		m.Type = parts[0]
 	default:
 		return &m

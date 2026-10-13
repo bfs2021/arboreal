@@ -23,6 +23,8 @@ func CreateModelProvider(uri, defaultType string) (ModelProvider, error) {
 		return newAnthropicService()
 	case ProviderOllama:
 		return &OllamaService{}, nil
+	case ProviderBedrock:
+		return newBedrockService()
 	default:
 		return nil, fmt.Errorf("unknown model type: %s", modelURI.Type)
 	}
