@@ -133,7 +133,7 @@ func arborealNewPlanner(l *lua.LState) int {
 	name := l.CheckString(1)
 	description := l.CheckString(2)
 
-	var behaviors []arboreal.Behavior
+	var behaviors []arboreal.Step
 	if l.GetTop() > 2 {
 		for i := 3; i <= l.GetTop(); i++ {
 			b := checkArborealBehavior(l, i)

@@ -212,7 +212,7 @@ func main() {
 	})
 
 	executive := arboreal.TodoListExecutive{
-		Behaviors: []arboreal.Behavior{
+		Behaviors: []arboreal.Step{
 			&askAboutClientBehavior,
 			&recordClientFact,
 			&listClients,

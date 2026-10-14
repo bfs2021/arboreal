@@ -1,5 +1,7 @@
 package arboreal
 
+import "fmt"
+
 type Snapshot map[string]snapshotvalue
 
 func (snap Snapshot) Restore(root Behavior) error {
@@ -62,21 +64,36 @@ func (snap Snapshot) Restore(root Behavior) error {
 			planner := lookupMap[t.Hash()].(*TodoListExecutive)
 			state := snap[t.Hash()]
 
-			planner.History = state.History
-
+			// The plan is built aside and installed with the history only
+			// once every step restored, so a refused step leaves the
+			// executive as it was.
+			var plan []*ExecGeneratedStep
 			for _, p := range state.Plan {
-				behavior := lookupMap[p.Ref].Copy()
-				err := p.Snapshot.Restore(behavior)
-				if err != nil {
+				original, ok := lookupMap[p.Ref]
+				if !ok {
+					return fmt.Errorf("arboreal: plan step %q refers to no behavior of this executive", p.Ref)
+				}
+				// A plan step's behavior must be a Step; a ref that names a
+				// state inside a tree would make a bare state one. Checked
+				// before the copy, which would panic on anything else.
+				step, ok := original.(Step)
+				if !ok {
+					return fmt.Errorf("arboreal: plan step %q is a %T, which cannot be a plan step", p.Ref, original)
+				}
+				behavior := copyStep(step)
+				if err := p.Snapshot.Restore(behavior); err != nil {
 					return err
 				}
 
-				planner.plan = append(planner.plan, &ExecGeneratedStep{
+				plan = append(plan, &ExecGeneratedStep{
 					Behavior:        behavior,
 					Messages:        p.Messages,
 					ReplanTombstone: p.ReplanTombstone,
 				})
 			}
+
+			planner.History = state.History
+			planner.plan = append(planner.plan, plan...)
 		}
 	}
 

@@ -25,6 +25,9 @@ func (b *ctxCapturingBehavior) Hash() string        { return "ctx-capturing-beha
 func (b *ctxCapturingBehavior) Name() string        { return "ctx-capturing-behavior" }
 func (b *ctxCapturingBehavior) Description() string { return "records the context it is called with" }
 func (b *ctxCapturingBehavior) Copy() Behavior      { return b }
+func (b *ctxCapturingBehavior) Select(transcript AnnotatedMessages) AnnotatedMessages {
+	return LastUserMessage(transcript)
+}
 
 func (b *ctxCapturingBehavior) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	b.called = true
@@ -483,7 +486,7 @@ func delayed(tree *BehaviorTree, d time.Duration) *BehaviorTree {
 // replyExecutive is an executive over the given trees, with the preamble and
 // the out-of-bounds handler every executive should set.
 func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
-	var behaviors []Behavior
+	var behaviors []Step
 	for _, tree := range trees {
 		behaviors = append(behaviors, tree)
 	}
@@ -1228,5 +1231,98 @@ func TestRunLoopAttachesTheRecord(t *testing.T) {
 	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
 	if got := recordOn(t, last); !reflect.DeepEqual(got, want) {
 		t.Fatalf("History's reply carries %+v, want %+v", got, want)
+	}
+}
+
+func TestRestoreRefusesAPlanStepThatIsNotAStep(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	// cannedTree pins its one state's hash to "tree-a-reply". A plan skeleton
+	// that refers to the state instead of the tree asks Restore to make a
+	// bare state a plan step.
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{"plan": []map[string]any{{
+		"ref":              "tree-a-reply",
+		"snapshot":         map[string]any{},
+		"messages":         AnnotatedMessages{},
+		"replan_tombstone": false,
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a state as a plan step, want an error")
+	}
+	if !strings.Contains(err.Error(), "tree-a-reply") {
+		t.Fatalf("error = %q, want it to name the ref", err)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0", n)
+	}
+}
+
+func TestRestoreRefusesAnUnknownRef(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{"plan": []map[string]any{{
+		"ref":              "tree-missing",
+		"snapshot":         map[string]any{},
+		"messages":         AnnotatedMessages{},
+		"replan_tombstone": false,
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a plan step whose ref names no behavior, want an error")
+	}
+	if !strings.Contains(err.Error(), "tree-missing") {
+		t.Fatalf("error = %q, want it to name the ref", err)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0", n)
+	}
+}
+
+func TestRestoreLeavesTheExecutiveUntouchedWhenAStepIsRefused(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"), cannedTree("tree-b", "B"))
+	// A history and a valid step come before the step whose ref names no
+	// behavior. None of it may be installed.
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{
+		"history": AppendToMessages(nil, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Hello"}),
+		"plan": []map[string]any{
+			{"ref": "tree-a", "snapshot": map[string]any{}, "messages": AnnotatedMessages{}, "replan_tombstone": false},
+			{"ref": "tree-missing", "snapshot": map[string]any{}, "messages": AnnotatedMessages{}, "replan_tombstone": false},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a plan with an unknown ref, want an error")
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0: the valid step before the bad one must not be installed", n)
+	}
+	if n := len(exec.History); n != 0 {
+		t.Fatalf("History holds %d messages after a refused restore, want 0", n)
 	}
 }
