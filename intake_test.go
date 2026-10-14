@@ -89,3 +89,41 @@ func TestTrailingUserMessagesReturnsANewSliceOfShallowCopies(t *testing.T) {
 		t.Fatal("the selection's annotation map is not the transcript's: a pinned annotation would not reach the transcript")
 	}
 }
+
+// Only a tree can be a plan step; this fails to compile if BehaviorTree
+// stops satisfying Step.
+var _ Step = (*BehaviorTree)(nil)
+
+func TestBehaviorTreeSelectsTheLastUserMessageByDefault(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+
+	got := contents(tree.Select(transcript("assistant", "hi", "user", "a", "user", "b")))
+
+	if want := []string{"b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Select = %v, want %v: a tree with no Intake takes the last user message", got, want)
+	}
+}
+
+func TestBehaviorTreeSelectsThroughItsIntake(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Intake = TrailingUserMessages
+
+	got := contents(tree.Select(transcript("assistant", "hi", "user", "a", "user", "b")))
+
+	if want := []string{"a", "b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Select = %v, want %v: the tree's Intake was not used", got, want)
+	}
+}
+
+func TestBehaviorTreeCopyKeepsTheIntake(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Intake = TrailingUserMessages
+
+	copied := tree.Copy().(*BehaviorTree)
+
+	// Funcs cannot be compared, so the copy is asked to select.
+	got := contents(copied.Select(transcript("assistant", "hi", "user", "a", "user", "b")))
+	if want := []string{"a", "b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the copy selected %v, want %v: Copy() dropped Intake", got, want)
+	}
+}

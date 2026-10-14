@@ -13,6 +13,23 @@ type Behavior interface {
 	Copy() Behavior
 }
 
+// A TranscriptSelector has a say over what it takes from the transcript at
+// the start of a turn. The executive calls Select on every pending step
+// when it resumes, and appends the result to the step's own messages.
+type TranscriptSelector interface {
+	Select(transcript AnnotatedMessages) AnnotatedMessages
+}
+
+// Step is what the executive plans over and resumes: a behavior that also
+// selects its input. In the framework only *BehaviorTree satisfies it,
+// which is also what the planner prompt requires. It is the type of a
+// planned step's behavior, not the planned step itself; that is
+// ExecGeneratedStep.
+type Step interface {
+	Behavior
+	TranscriptSelector
+}
+
 type BehaviorTree struct {
 	BehaviorName        string          `json:"name"`
 	BehaviorDescription string          `json:"description"`
@@ -21,6 +38,14 @@ type BehaviorTree struct {
 	State               Stack[Behavior] `json:"state"`
 	Traversed           map[string]bool `json:"traversed"`
 	ClientID            string          `json:"client_id"`
+
+	// Intake selects, from the transcript, the messages appended to this
+	// tree's step when the executive resumes it. Nil selects the last user
+	// message since the agent last spoke, or nothing (see LastUserMessage);
+	// TrailingUserMessages selects every user message since then. It is
+	// code, not state: snapshots do not carry it, and Copy hands the same
+	// func to the copy, so it must not capture the tree it is set on.
+	Intake func(transcript AnnotatedMessages) AnnotatedMessages `json:"-"`
 
 	stateLookupMap map[any]int
 	hash           string
@@ -58,12 +83,21 @@ func (b *BehaviorTree) Description() string {
 	return b.BehaviorDescription
 }
 
+// Select is the tree's Intake, or the last user message when none is set.
+func (b *BehaviorTree) Select(transcript AnnotatedMessages) AnnotatedMessages {
+	if b.Intake == nil {
+		return LastUserMessage(transcript)
+	}
+	return b.Intake(transcript)
+}
+
 func (b *BehaviorTree) Copy() Behavior {
 	var t BehaviorTree
 
 	t.BehaviorName = b.BehaviorName
 	t.BehaviorDescription = b.BehaviorDescription
 	t.ClientID = b.ClientID
+	t.Intake = b.Intake
 	t.Example = b.Example
 	t.Graph = b.Graph
 	t.State = Stack[Behavior]{}
