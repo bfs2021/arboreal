@@ -75,7 +75,7 @@ The pattern this produces is one constructor function that builds the same execu
 
 ## Restore, and what "resume" really means
 
-`Restore(root)` in `snapshot.go` makes two passes. The first walks the behavior graph from `root` and builds `lookupMap`, hash to `Behavior`, noting which behaviors have entries in the map. The second rehydrates them: a tree entry gets its `Traversed` set back and its `State` stack rebuilt by looking each saved ref up in `lookupMap`; an executive entry gets `History` assigned back, and each skeleton in `plan` rebuilt as a live step — `lookupMap[p.Ref].Copy()` for the behavior, the skeleton's nested `Snapshot` restored *into that copy*, and the skeleton's `messages` and `replan_tombstone` carried over into an `ExecGeneratedStep`. After that, `len(e.plan)` is nonzero, and the next `Call` takes Chapter 9's resume branch as if the process had never exited.
+`Restore(root)` in `snapshot.go` makes two passes. The first walks the behavior graph from `root` and builds `lookupMap`, hash to `Behavior`, noting which behaviors have entries in the map. The second rehydrates them: a tree entry gets its `Traversed` set back and its `State` stack rebuilt by looking each saved ref up in `lookupMap`; an executive entry gets `History` assigned back, and each skeleton in `plan` rebuilt as a live step — the behavior `p.Ref` names in `lookupMap`, copied (an absent ref, or one that is not a `Step`, is an error instead), the skeleton's nested `Snapshot` restored *into that copy*, and the skeleton's `messages` and `replan_tombstone` carried over into an `ExecGeneratedStep`. After that, `len(e.plan)` is nonzero, and the next `Call` takes Chapter 9's resume branch as if the process had never exited.
 
 Now the empty `"snapshot": {}` from the JSON walk. `pauseState` in the example is a leaf: when it paused, it had no children to push, so the tree's `State` stack was empty — and `TakeSnapshot`'s tree case records an entry only inside `if !t.State.IsEmpty()`. A tree paused at a leaf records no cursor at all. Restored, the step holds a fresh copy with an empty stack, and on the next `Call` the walk restarts from `Graph.Initial()`: `chatState` runs again, on a message list that now ends with the user's new message. Nothing was lost, because there was nothing to lose — this is Chapter 7's restart-vs-resume rule, unchanged by the process exit. A tree that drained its stack, or paused at the end of a chain, restarts from the entry; continuity lives in the step's `Messages`, not in the tree's position, and the second run's `Your name is John!` came from exactly that: a restarted walk over a remembered conversation.
 
@@ -120,10 +120,10 @@ The output, verbatim and the same on every run:
 2. after Call: reply="Hello! I am a canned reply."
    snapshot: entries=1 err=<nil>
 3. wrong exec id: restore err=<nil>, entries after=0
-4. unknown step ref: panic: runtime error: invalid memory address or nil pointer dereference
+4. unknown step ref: err=arboreal: plan step "tree-gone" refers to no behavior of this executive
 ```
 
-Probe 1 is the first condition made visible: no plan, no entry, and an empty map with a `nil` error is the normal shape of "nothing pending". Probe 2 seeds a plan through `Restore` and runs a whole turn with no model anywhere — seeding via `Restore` is the *only* way to put a plan in flight from outside the package without invoking the LLM planner, since `plan` is unexported; Chapter 13 turns that into a testing technique, and the example's own `TestSnapshotRoundTrip` in `main_test.go` is the first use. Probe 3 restores under a mismatched executive id: no error, no entry, no state — a silent fresh start. Probe 4 restores a step whose `ref` names no behavior, and the process panics rather than erring. Both of those last two reappear as sharp edges below.
+Probe 1 is the first condition made visible: no plan, no entry, and an empty map with a `nil` error is the normal shape of "nothing pending". Probe 2 seeds a plan through `Restore` and runs a whole turn with no model anywhere — seeding via `Restore` is the *only* way to put a plan in flight from outside the package without invoking the LLM planner, since `plan` is unexported; Chapter 13 turns that into a testing technique, and the example's own `TestSnapshotRoundTrip` in `main_test.go` is the first use. Probe 3 restores under a mismatched executive id: no error, no entry, no state — a silent fresh start. Probe 4 restores a step whose `ref` names no behavior, and `Restore` returns an error naming the ref and installs nothing. Both of those last two reappear as sharp edges below.
 
 ## Coming from LangGraph
 
@@ -140,7 +140,7 @@ An executive with nothing pending is absent from its own snapshot — `history` 
 ```
 
 ```admonish warning title="Sharp edge"
-`Restore` has two failure modes and neither is an error return. An executive id with no snapshot entry restores nothing and reports nothing — a silent fresh start. A plan step whose `ref` matches no behavior panics: the lookup yields a nil `Behavior` interface and `Restore` calls `.Copy()` on it (probe 4's `runtime error: invalid memory address or nil pointer dereference`). Treat a restore after any id change as suspect, and keep ids as stable as a database schema.
+`Restore` has two failure modes and only one is an error return. An executive id with no snapshot entry restores nothing and reports nothing — a silent fresh start. A plan step whose `ref` matches no behavior, or names something that is not a tree, makes `Restore` return an error naming the `ref` (probe 4), and the executive is left as it was: the plan and the history are installed only once every step has restored. Treat a restore after any id change as suspect, and keep ids as stable as a database schema.
 ```
 
 ```admonish warning title="Sharp edge"
