@@ -66,14 +66,23 @@ type TodoListExecutive struct {
 	// PlannerModel is the model URI for the planning call only, e.g.
 	// "anthropic:claude-sonnet-4-20250514". Empty falls back to the context
 	// default set with WithDefaultModel. It does not apply to the executive's
-	// other LLM calls: the turn summary in Execute and the states inside its
-	// behaviors resolve their own Model, then the context default.
+	// other LLM calls: the turn summary in Execute has SummaryModel, and the
+	// states inside its behaviors resolve their own Model, then the context
+	// default.
 	PlannerModel string
 
 	// RepairModel is the model URI for repairing malformed planner JSON.
 	// Empty inherits the resolved PlannerModel, so repair never runs on a
 	// model the caller did not name.
 	RepairModel string
+
+	// SummaryModel is the model URI for the turn summary in Execute, the
+	// call that writes the reply when more than one step ran, or a lone
+	// step failed. Empty falls back to the context default set with
+	// WithDefaultModel, like a behavior state's Model. It does not inherit
+	// PlannerModel: the summary is prose for the user, not the routing
+	// decision, so naming a planner leaves the reply's voice on the default.
+	SummaryModel string
 
 	// FIXME: This shouldn't work this way
 	Output string
@@ -619,14 +628,17 @@ final:
 
 	// The summarizer is the executive's own state, called through the
 	// traced wrapper so its begin and end ride the trace like any state's.
-	// Model is left empty: it resolves to the context default or the
-	// fallback, as the behaviors' states do.
+	// Its model is resolved here into a local, the way Plan resolves the
+	// planner's: SummaryModel if set, else the context default, else the
+	// fallback. It does not inherit PlannerModel.
+	summaryModel := modelURIFor(ctx, e.SummaryModel)
 	summarize := LLMCompletionState(LLMCompletionOptions{
 		Id:          e.Hash() + "-summarize",
 		Name:        "summarize",
 		Description: "Writes the turn's reply from the steps' results",
 		ClientID:    e.ClientID,
 		System:      buf.String(),
+		Model:       summaryModel,
 	})
 	m, sig := summarize.Call(ctx, AnnotatedMessages{
 		*messages.LastMessage(),
@@ -670,6 +682,7 @@ func (e *TodoListExecutive) Copy() Behavior {
 	t.ClientID = e.ClientID
 	t.PlannerModel = e.PlannerModel
 	t.RepairModel = e.RepairModel
+	t.SummaryModel = e.SummaryModel
 
 	t.planDepth = e.planDepth
 	t.OutOfBoundsHandler = e.OutOfBoundsHandler.Copy()

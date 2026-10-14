@@ -259,14 +259,15 @@ func TestCopyPreservesModelFields(t *testing.T) {
 	exec.OutOfBoundsHandler = exec.Behaviors[0]
 	exec.PlannerModel = "anthropic:planner"
 	exec.RepairModel = "openai:repair"
+	exec.SummaryModel = "anthropic:summary"
 
 	copied, ok := exec.Copy().(*TodoListExecutive)
 	if !ok {
 		t.Fatalf("Copy() returned %T, want *TodoListExecutive", exec.Copy())
 	}
-	if copied.PlannerModel != exec.PlannerModel || copied.RepairModel != exec.RepairModel {
-		t.Fatalf("Copy() = (PlannerModel %q, RepairModel %q), want (%q, %q)",
-			copied.PlannerModel, copied.RepairModel, exec.PlannerModel, exec.RepairModel)
+	if copied.PlannerModel != exec.PlannerModel || copied.RepairModel != exec.RepairModel || copied.SummaryModel != exec.SummaryModel {
+		t.Fatalf("Copy() = (PlannerModel %q, RepairModel %q, SummaryModel %q), want (%q, %q, %q)",
+			copied.PlannerModel, copied.RepairModel, copied.SummaryModel, exec.PlannerModel, exec.RepairModel, exec.SummaryModel)
 	}
 }
 
@@ -685,6 +686,71 @@ func TestExecuteSummarizerFailureKeepsThePausedSteps(t *testing.T) {
 	if n := len(exec.plan); n != 2 {
 		t.Fatalf("plan holds %d steps, want the 2 paused ones", n)
 	}
+}
+
+// summaryErrorMessage runs Execute on an executive whose seeded steps make
+// the summarizer run and returns the message of the *ErrorSignal it comes
+// back with. Every case below configures a model that cannot produce a
+// provider, so reaching the summarizer's model call at all is the assertion.
+func summaryErrorMessage(t *testing.T, exec *TodoListExecutive, ctx context.Context) string {
+	t.Helper()
+	sig := exec.Execute(ctx, userTurn())
+	es, ok := sig.(*ErrorSignal)
+	if !ok {
+		t.Fatalf("Execute returned %T (%v), want the summarizer's *ErrorSignal for an unresolvable model", sig, sig)
+	}
+	return es.ErrorMessage
+}
+
+func TestExecuteSummarizerUsesConfiguredModel(t *testing.T) {
+	const clusterErr = "unknown model type: cluster"
+	const anthropicErr = "ANTHROPIC_TOKEN environment variable not set"
+
+	t.Run("context default reaches the summarizer", func(t *testing.T) {
+		noModel(t)
+		ctx := WithDefaultModel(context.Background(), "cluster:ctx-probe")
+		if got := summaryErrorMessage(t, twoFinishingSteps(t), ctx); !strings.Contains(got, clusterErr) {
+			t.Fatalf("error = %q, want it to contain %q (context default was not used)", got, clusterErr)
+		}
+	})
+
+	t.Run("SummaryModel reaches the summarizer", func(t *testing.T) {
+		noModel(t)
+		exec := twoFinishingSteps(t)
+		exec.SummaryModel = "cluster:summary-probe"
+		if got := summaryErrorMessage(t, exec, context.Background()); !strings.Contains(got, clusterErr) {
+			t.Fatalf("error = %q, want it to contain %q (SummaryModel was not used)", got, clusterErr)
+		}
+	})
+
+	t.Run("SummaryModel takes precedence over the context default", func(t *testing.T) {
+		noModel(t)
+		exec := twoFinishingSteps(t)
+		exec.SummaryModel = "anthropic:summary-probe"
+		ctx := WithDefaultModel(context.Background(), "cluster:ctx-probe")
+		got := summaryErrorMessage(t, exec, ctx)
+		if !strings.Contains(got, anthropicErr) {
+			t.Fatalf("error = %q, want it to contain %q (SummaryModel did not win)", got, anthropicErr)
+		}
+		if strings.Contains(got, clusterErr) {
+			t.Fatalf("error = %q mentions the context default; SummaryModel should have taken precedence", got)
+		}
+	})
+
+	t.Run("PlannerModel and RepairModel do not reach the summarizer", func(t *testing.T) {
+		noModel(t)
+		exec := twoFinishingSteps(t)
+		exec.PlannerModel = "cluster:planner-probe"
+		exec.RepairModel = "cluster:repair-probe"
+		ctx := WithDefaultModel(context.Background(), "anthropic:ctx-probe")
+		got := summaryErrorMessage(t, exec, ctx)
+		if !strings.Contains(got, anthropicErr) {
+			t.Fatalf("error = %q, want it to contain %q (the summarizer should use the context default, not inherit the planner's model)", got, anthropicErr)
+		}
+		if strings.Contains(got, clusterErr) {
+			t.Fatalf("error = %q mentions the planner's model; the summarizer must not inherit it", got)
+		}
+	})
 }
 
 func TestExecuteLoneFinishedStepRepliesAsWritten(t *testing.T) {
