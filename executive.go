@@ -696,6 +696,18 @@ func (e *TodoListExecutive) annotateReply(reply *AnnotatedMessage) {
 	}
 }
 
+// resume hands every pending step the part of the transcript its behavior
+// selects, appended to the step's own messages. A Re-plan tombstone has no
+// behavior and takes nothing.
+func (e *TodoListExecutive) resume(transcript AnnotatedMessages) {
+	for _, step := range e.plan {
+		if step.ReplanTombstone {
+			continue
+		}
+		step.Messages = append(step.Messages, step.Behavior.Select(transcript)...)
+	}
+}
+
 func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	var trace Trace
 
@@ -722,10 +734,7 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 	if len(e.plan) <= 0 {
 		e.Plan(ctx, messages)
 	} else {
-		// FIXME: This may need to be tailored to each behavior
-		for _, p := range e.plan {
-			p.Messages = append(p.Messages, *messages.LastMessage())
-		}
+		e.resume(messages)
 	}
 
 	sig := e.Execute(ctx, messages)
@@ -777,9 +786,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 		if len(e.plan) == 0 {
 			e.Plan(ctx, e.History)
 		} else {
-			for _, step := range e.plan {
-				step.Messages = append(step.Messages, *e.History.LastMessage())
-			}
+			e.resume(e.History)
 		}
 
 		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
