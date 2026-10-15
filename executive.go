@@ -674,6 +674,21 @@ func (e *TodoListExecutive) Copy() Behavior {
 	return &t
 }
 
+// annotateReply pins this turn's tool-call record onto the reply the caller
+// just appended, when any tool ran. The reply's map is fresh from
+// AppendToMessages, so there is nothing to collide with and no nil to guard;
+// on a turn with no calls the annotation is absent, not empty.
+func (e *TodoListExecutive) annotateReply(reply *AnnotatedMessage) {
+	if len(e.ToolCalls) == 0 {
+		return
+	}
+	reply.Annotations[AnnotationToolCalls] = Annotation{
+		Name:        AnnotationToolCalls,
+		Data:        e.ToolCalls,
+		Explanation: "the tool calls this turn's steps made, in plan order",
+	}
+}
+
 func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	var trace Trace
 
@@ -708,9 +723,11 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 
 	sig := e.Execute(ctx, messages)
 
-	// A turn that produced a reply appends it; a turn that did not returns
-	// the list it was given, unchanged, and the failure. A pause inside is
-	// still not reported: the snapshot is how a caller finds out.
+	// A turn that produced a reply appends it, with the turn's tool-call
+	// record pinned on when any tool ran; a turn that did not returns the
+	// list it was given, unchanged, and the failure, and the record of what
+	// ran before the failure is on e.ToolCalls only. A pause inside is still
+	// not reported: the snapshot is how a caller finds out.
 	var err error
 	if es, ok := sig.(*ErrorSignal); ok {
 		err = es
@@ -719,6 +736,7 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(messages.LastMessage())
 	}
 
 	now := time.Now()

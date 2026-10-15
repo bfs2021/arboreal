@@ -1040,3 +1040,62 @@ func TestExecuteRecordsAFailedHandlersCalls(t *testing.T) {
 		t.Fatalf("ToolCalls = %+v, want %+v: a failed handler's calls are recorded too", exec.ToolCalls, want)
 	}
 }
+
+// recordOn decodes the tool-call record on m, failing the test if m carries
+// none or it does not decode.
+func recordOn(t *testing.T, m *AnnotatedMessage) []ToolCallRecord {
+	t.Helper()
+	a, ok := m.Annotations[AnnotationToolCalls]
+	if !ok {
+		t.Fatalf("the message %q carries no %q annotation; it has %v", m.Content, AnnotationToolCalls, m.Annotations)
+	}
+	got, err := ToolCallsFromAnnotation(&a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestCallAttachesTheRecordToTheReply(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+	in := userTurn()
+
+	out, sig := exec.Call(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if len(out) != len(in)+1 || out.LastMessage().Content != "We have one copy." {
+		t.Fatalf("Call returned %d messages ending %q, want the input plus the reply", len(out), out.LastMessage().Content)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if got := recordOn(t, out.LastMessage()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the reply's record = %+v, want %+v", got, want)
+	}
+	for i, m := range out[:len(in)] {
+		if _, ok := m.Annotations[AnnotationToolCalls]; ok {
+			t.Fatalf("input message %d gained a %q annotation; only the reply carries it", i, AnnotationToolCalls)
+		}
+	}
+}
+
+func TestCallAttachesNoRecordWithoutCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))
+	seedPlan(t, exec, "tree-a")
+
+	out, sig := exec.Call(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if _, ok := out.LastMessage().Annotations[AnnotationToolCalls]; ok {
+		t.Fatalf("the reply carries a %q annotation on a turn with no tool call; it must be absent, not empty", AnnotationToolCalls)
+	}
+	if n := len(exec.ToolCalls); n != 0 {
+		t.Fatalf("ToolCalls holds %d records, want none", n)
+	}
+}
