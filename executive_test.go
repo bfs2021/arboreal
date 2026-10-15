@@ -592,6 +592,9 @@ func TestExecuteOutOfBoundsHandlerReplies(t *testing.T) {
 	if exec.Output != "out of bounds" {
 		t.Fatalf("Output = %q, want the handler's canned reply", exec.Output)
 	}
+	if n := len(exec.ToolCalls); n != 0 {
+		t.Fatalf("ToolCalls holds %d records, want none: the handler called no tool", n)
+	}
 }
 
 // twoFinishingSteps seeds a plan whose two steps both finish, so the reply
@@ -961,5 +964,79 @@ func TestExecuteRecordsEveryStepInPlanOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(exec.ToolCalls, want) {
 		t.Fatalf("ToolCalls = %+v, want %+v, in plan order", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsTheOutOfBoundsHandlersCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-tool-handler",
+		StateName: "tool handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: "file_feedback", Arguments: map[string]any{"text": "Hello"}}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleFunction, Name: "file_feedback", Content: "issue 42",
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleAssistant, Content: "Filed as issue 42.",
+				}},
+			), nil
+		},
+	}
+	// No plan seeded: Execute goes straight to the handler.
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Filed as issue 42." {
+		t.Fatalf("Output = %q, want the handler's reply", exec.Output)
+	}
+	want := []ToolCallRecord{{Step: "tool handler", Tool: "file_feedback", Arguments: map[string]any{"text": "Hello"}, Result: "issue 42"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v with the handler's Name() as Step", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsAFailedHandlersCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-failing-tool-handler",
+		StateName: "failing tool handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: "file_feedback", Arguments: map[string]any{"text": "Hello"}}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleFunction, Name: "file_feedback", Content: "issue 42",
+				}},
+			), &ErrorSignal{ErrorMessage: "reply failed", ErrorType: StateErrorTypeUnknown}
+		},
+	}
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	// The tool ran before the handler failed. The framework has no undo for
+	// it, so the record says that it did, on the field, while Output stays
+	// empty.
+	es, ok := sig.(*ErrorSignal)
+	if !ok || es.ErrorMessage != "reply failed" {
+		t.Fatalf("Execute returned %T (%v), want the handler's *ErrorSignal", sig, sig)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty", exec.Output)
+	}
+	want := []ToolCallRecord{{Step: "failing tool handler", Tool: "file_feedback", Arguments: map[string]any{"text": "Hello"}, Result: "issue 42"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v: a failed handler's calls are recorded too", exec.ToolCalls, want)
 	}
 }

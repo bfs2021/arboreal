@@ -537,6 +537,9 @@ func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessa
 				Annotations:           make(map[string]Annotation),
 			},
 		})
+		// The handler was given one message; whatever it added past it is
+		// read for tool calls like a step's part, whatever its signal.
+		e.ToolCalls = append(e.ToolCalls, recordToolCalls(e.OutOfBoundsHandler.Name(), addedAfter(m, 1))...)
 		if err, ok := sig.(*ErrorSignal); ok {
 			e.Output = ""
 			return err
