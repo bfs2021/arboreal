@@ -22,6 +22,17 @@ Narrowing what is *offered* does not narrow what the model can *name*: a model c
 
 One limit, read straight off the source: `ToolCalls[0]` is hardcoded, so a reply that makes several calls gets exactly one executed, and the extras survive only as unexecuted entries inside the appended assistant message — no result, no error. (The default OpenAI provider still speaks the legacy single-function-call API and can surface only one call per reply anyway; providers that do parallel calls hit this limit for real.) And one thing that is not a limit: tool calls and their results do land in the history — the two appends in the loop put them there, and the dump in the next section is the proof.
 
+That history is the state's, which under an executive is the step's own message list, and a finished step's list is dropped when the turn ends (Chapter 8). So the executive copies the executed calls out. After the fan-out, for every step that ran — finished, paused or failed — and for the out-of-bounds handler, each `function`-role message the step added this turn that directly follows an assistant message naming the same tool becomes a `ToolCallRecord{Step, Tool, Arguments, Result}`: the behavior's `Name()`, the tool, a copy of the call's arguments map, and the result string the loop built. The records are collected in plan order on the executive's `ToolCalls` field, and `Call` and `RunLoop` pin the slice onto the reply they append as the `tool_calls` annotation (`AnnotationToolCalls`), absent when no tool ran. A paused step's reply records this turn's calls only, however long its list has grown. Nothing that produced no result is in it: a call the state refused, a `CallTool` that failed, and the unexecuted extras of a parallel reply. Read it back with `ToolCallsFromAnnotation`, which decodes the typed slice before a JSON round trip and the generic shape after one. `GetAnnotation` is the wrong tool here, since it returns the newest message's entry only; a reader that wants every call in a transcript walks the assistant messages:
+
+```go
+for _, m := range transcript {
+	if a, ok := m.Annotations[arboreal.AnnotationToolCalls]; ok {
+		calls, err := arboreal.ToolCallsFromAnnotation(&a)
+		// …
+	}
+}
+```
+
 ## Run it
 
 `examples/tools` is the whole mechanism in one file: one tool, one question, one `Call` — no executive, no tree, a state driven directly as in Chapter 5. The tool is an ordinary function:
@@ -120,5 +131,5 @@ The tool loop lives inside Chapter 2's step 4 — the tree walks its states, and
 - `Tools` narrows what a state offers to the names given, in that order; the loop executes nothing outside it, and a name the mux lacks fails before the model is called.
 - In-memory transport = tools with no network; HTTP/SSE for real servers, bearer on HTTP only.
 - One tool call per round; a missing mux is silent (with `Tools` empty); `Close` the mux.
-- Tool calls and results do land in the history.
+- Tool calls and results do land in the history, and the executive copies the executed ones onto the reply as `tool_calls`; a finished step's calls are not lost with it.
 ```
