@@ -72,7 +72,7 @@ The channel is unbuffered and `Send` is a plain send. Attach a trace and stop dr
 ```
 
 ```admonish warning title="Sharp edge"
-`Operations` never reports a history change. The diff in `BehaviorState.Call` iterates the slice the state was called with, not the one it returned, so appended messages never reach the trace — only annotation adds can appear, and only from states that leave the breadcrumb. What a state did to the history must still be read from the history itself.
+`Operations` never reports a history change. The diff in `BehaviorState.Call` iterates the slice the state was called with, not the one it returned, so appended messages never reach the trace — only annotation adds can appear, and only from states that leave the breadcrumb. What a state did to the history must still be read from the history itself, and what a turn's tools did is not on the trace either: read it from the `tool_calls` annotation on the reply the executive appends (Chapter 12).
 ```
 
 ```admonish warning title="Sharp edge"
@@ -86,5 +86,5 @@ Set the eight lines against Chapter 2's numbered steps. The executive's envelope
 ```admonish example title="Recap"
 - `Trace` is `chan *TraceMessage` under the context key `"arboreal_trace"`.
 - Drain it or deadlock; nil is a safe no-op.
-- Name your states or their lines are anonymous; signals ride the state's and the tree's `end_call`, and the executive's only when the turn produced no reply; `Operations` never carries a history change.
+- Name your states or their lines are anonymous; signals ride the state's and the tree's `end_call`, and the executive's only when the turn produced no reply; `Operations` never carries a history change, and what a turn's tools did is on the reply's `tool_calls`, not on the trace.
 ```
