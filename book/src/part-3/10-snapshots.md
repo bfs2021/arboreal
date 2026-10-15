@@ -144,7 +144,7 @@ An executive with nothing pending is absent from its own snapshot — `history` 
 ```
 
 ```admonish warning title="Sharp edge"
-`Annotation.Data` is `any` and a snapshot is JSON: numbers come back `float64`, objects `map[string]any` (Chapter 4). Every annotation your states type-assert must tolerate the JSON shapes after a restore.
+`Annotation.Data` is `any` and a snapshot is JSON: numbers come back `float64`, objects `map[string]any` (Chapter 4). Every annotation your states type-assert must tolerate the JSON shapes after a restore. The executive's own `tool_calls` record has no key of its own in a snapshot: it rides the reply on the transcript, so it is in `history` exactly when that reply is (Chapter 9), and after a JSON round trip — the snapshot's or your store's — it reads back through `ToolCallsFromAnnotation`, which takes the typed slice and the JSON shape alike, so do not assert on its `Data` by hand.
 ```
 
 Because a snapshot is plain data, you can also edit it. Delete the last exchange from `history` and from a step's `messages` and you have rewound the conversation by a turn; drop an annotation and the system un-learns a fact; rewrite a direction and the next resume runs under different orders. This is a powerful debugging tool — replaying a turn from a doctored snapshot is often the fastest way to isolate a misbehaving step — but nothing validates what you write back, so you own the consequences.

@@ -195,7 +195,7 @@ A LangGraph `State` is a schema: `TypedDict` fields, each optionally with a redu
 ```
 
 ```admonish warning title="Sharp edge"
-The framework uses the annotation map for its own bookkeeping. `__trace_annotations` is a breadcrumb written by `AddTraceInformation` and scrubbed by `BehaviorState.Call`; `plan`, `raw_history` and `$context` are written by the executive. Iterate over annotations by the names you own, never over the whole map.
+The framework uses the annotation map for its own bookkeeping. `__trace_annotations` is a breadcrumb written by `AddTraceInformation` and scrubbed by `BehaviorState.Call`; `plan`, `raw_history`, `$context` and `tool_calls` are written by the executive, the last onto the reply it appends, as the record of the turn's executed tool calls (Chapter 12). Iterate over annotations by the names you own, never over the whole map, and never write these names yourself.
 ```
 
 ```admonish warning title="Sharp edge"

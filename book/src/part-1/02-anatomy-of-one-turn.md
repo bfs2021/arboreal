@@ -226,6 +226,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(e.History.LastMessage())
 
 		err = c.Send(&ChannelMessage{
 			Id:      cm.Id,
@@ -238,7 +239,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 }
 ```
 
-`RunLoop` appends `e.Output` to `History` as an assistant-role message, again with `AppendToMessages`, and calls `Channel.Send`. `TerminalChannel.Send` prints `[Assistant Response]`, a blank line, the content, and a blank line. `History` now holds two messages, `plan` holds one paused step, and the turn is over. `RunLoop` goes back to the top and blocks in `Receive`.
+`RunLoop` appends `e.Output` to `History` as an assistant-role message, again with `AppendToMessages`, pins the turn's tool-call record on it when any tool ran (Chapter 12), and calls `Channel.Send`. `TerminalChannel.Send` prints `[Assistant Response]`, a blank line, the content, and a blank line. `History` now holds two messages, `plan` holds one paused step, and the turn is over. `RunLoop` goes back to the top and blocks in `Receive`.
 
 ### Step 7 — The next turn
 
@@ -268,7 +269,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 `executePlan` calls `step.Behavior.Call` on the same tree copy as last turn. Its stack is empty, because the pause state had no children to push, so `BehaviorTree.Call` starts over: it pushes `Graph.Initial()`, resets `Traversed`, and runs `chatState` again. This time `chatState` sends the whole three-message list to the model, so the model sees a conversation with a prior exchange in it, and its reply is appended as the fourth message. `pauseState` runs, returns `CollectUserInputSignal`, the step is kept, it is the only step that ran, and `Output` is the new reply as written. The pattern repeats for as long as you keep typing. That is the whole chat loop: plan once, then resume the paused step forever, on a message list that grows by two messages every turn.
 
 ```admonish warning title="Sharp edge"
-There are two conversations. The executive's `History` is the transcript you would show a user: their messages and the executive's outputs. Each step's `Messages` is what the model actually sees: the planner's direction, the replies, and every later user message appended on resume. They are related but not identical, and when something looks wrong in a reply, the step's messages are the ones to inspect.
+There are two conversations. The executive's `History` is the transcript you would show a user: their messages and the executive's outputs. Each step's `Messages` is what the model actually sees: the planner's direction, the replies, and every later user message appended on resume. They are related but not identical, and when something looks wrong in a reply, the step's messages are the ones to inspect. Besides the reply itself, one thing crosses back from the steps to the transcript: when a step called a tool, the reply the executive appends carries a `tool_calls` annotation recording which step called which tool, with what arguments, and what it answered (Chapter 12), so the transcript can say what a turn *did* even after the step and its messages are gone.
 ```
 
 ## Vocabulary

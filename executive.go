@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"text/template"
@@ -31,6 +32,21 @@ type PlanResult struct {
 	Signal   Signal             `json:"signal"`
 }
 
+// ToolCallRecord is one executed tool call: the step that made it, the tool,
+// the arguments the model gave, and the text the tool answered with (the
+// Content of the function-role message the state appended, see state.go).
+type ToolCallRecord struct {
+	Step      string         `json:"step"`
+	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Result    string         `json:"result"`
+}
+
+// AnnotationToolCalls names the annotation the executive puts on the reply it
+// appends: a []ToolCallRecord of this turn's executed tool calls, in plan
+// order. Reserved, like raw_history and $context.
+const AnnotationToolCalls = "tool_calls"
+
 type TodoListExecutive struct {
 	ExecName           string
 	ExecDescription    string
@@ -55,6 +71,13 @@ type TodoListExecutive struct {
 
 	// FIXME: This shouldn't work this way
 	Output string
+
+	// ToolCalls is this turn's executed tool calls, in plan order, set by
+	// Execute alongside Output and attached by Call and RunLoop to the reply
+	// they append. Empty when no tool ran. It shares Output's side-channel
+	// shape, and its FIXME. The reply's annotation holds this same slice,
+	// not a copy.
+	ToolCalls []ToolCallRecord
 
 	plan      []*ExecGeneratedStep
 	planDepth int
@@ -307,16 +330,60 @@ func (e *TodoListExecutive) Plan(ctx context.Context, messages AnnotatedMessages
 	}
 }
 
+// recordToolCalls reads the executed tool calls in part, in order: every
+// function-role message paired with the assistant message before it. That
+// pair is exactly what LLMCompletionState's loop appends; the shape is the
+// contract, so a pair a lambda state appended by hand is recorded too. A
+// reply with several ToolCalls yields one record, for the first entry, since
+// only it was executed and only it has a result.
+func recordToolCalls(step string, part AnnotatedMessages) []ToolCallRecord {
+	var out []ToolCallRecord
+	for i := 1; i < len(part); i++ {
+		result := part[i]
+		if result.Role != llm.ChatMessageRoleFunction {
+			continue
+		}
+		call := part[i-1]
+		if call.Role != llm.ChatMessageRoleAssistant || len(call.ToolCalls) == 0 || call.ToolCalls[0].Name != result.Name {
+			continue
+		}
+		out = append(out, ToolCallRecord{
+			Step:      step,
+			Tool:      result.Name,
+			Arguments: maps.Clone(call.ToolCalls[0].Arguments),
+			Result:    result.Content,
+		})
+	}
+	return out
+}
+
+// addedAfter is what a behavior appended to a list that held before
+// messages when it was called: this turn's part of a step, or the handler's
+// list past the one message it was given. A behavior that returned fewer
+// messages than it was given added nothing.
+func addedAfter(messages AnnotatedMessages, before int) AnnotatedMessages {
+	if len(messages) < before {
+		return nil
+	}
+	return messages[before:]
+}
+
 func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGeneratedStep) []PlanResult {
 	var wg sync.WaitGroup
 
 	var results = make(chan *PlanResult, len(plan)+1)
 
-	for _, step := range plan {
+	// before[i] is how long step i's list was when its goroutine started.
+	// Everything the behavior appends is at that index and beyond, so a
+	// resumed step's earlier turns are never re-read.
+	before := make([]int, len(plan))
+
+	for i, step := range plan {
 		if step.ReplanTombstone {
 			continue
 		}
 
+		before[i] = len(step.Messages)
 		wg.Add(1)
 
 		go func() {
@@ -334,6 +401,17 @@ func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGenerat
 	}
 
 	wg.Wait()
+
+	// Every goroutine has returned, so each step's list is final. The
+	// records are built in plan order, not in the completion order the
+	// results channel holds, and whatever signal the step ended with.
+	for i, step := range plan {
+		if step.ReplanTombstone {
+			continue
+		}
+		e.ToolCalls = append(e.ToolCalls, recordToolCalls(step.Behavior.Name(), addedAfter(step.Messages, before[i]))...)
+	}
+
 	results <- nil
 
 	var result []PlanResult
@@ -426,14 +504,24 @@ Rephrase the following statements or questions as a single question or statement
 {{ end }}
 `
 
-// Execute runs the plan and decides the turn's reply. It writes e.Output
-// and e.plan (and, on a re-plan, rewrites the last message of messages with
-// the direction and the summaries) and returns a Signal: nil when Output
-// holds the reply, the *ErrorSignal of the out-of-bounds handler or of the
-// summarizer when the call that was to write the reply failed. On failure
-// Output is empty and e.plan holds the kept steps as a successful turn would
-// have stored them.
+// Execute runs the plan and decides the turn's reply. It writes e.Output,
+// e.ToolCalls and e.plan (and, on a re-plan, rewrites the last message of
+// messages with the direction and the summaries) and returns a Signal: nil
+// when Output holds the reply, the *ErrorSignal of the out-of-bounds handler
+// or of the summarizer when the call that was to write the reply failed. On
+// failure Output is empty and e.plan holds the kept steps as a successful
+// turn would have stored them; ToolCalls holds whatever ran, on a failed
+// turn as on a successful one.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
+	// One turn, one record: cleared here and nowhere else, so a re-plan's
+	// first round keeps its calls.
+	e.ToolCalls = nil
+	return e.execute(ctx, messages)
+}
+
+// execute is Execute's body. The re-plan recursion calls it, not Execute, so
+// the first round's tool-call records survive into the second round's.
+func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
 		// A turn that ends here ends like any other: the re-plan depth
 		// starts fresh next turn.
@@ -450,6 +538,9 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 				Annotations:           make(map[string]Annotation),
 			},
 		})
+		// The handler was given one message; whatever it added past it is
+		// read for tool calls like a step's part, whatever its signal.
+		e.ToolCalls = append(e.ToolCalls, recordToolCalls(e.OutOfBoundsHandler.Name(), addedAfter(m, 1))...)
 		if err, ok := sig.(*ErrorSignal); ok {
 			e.Output = ""
 			return err
@@ -494,7 +585,7 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 			e.planDepth += 1
 
 			e.Plan(ctx, messages)
-			return e.Execute(ctx, messages)
+			return e.execute(ctx, messages)
 		}
 	}
 
@@ -584,6 +675,21 @@ func (e *TodoListExecutive) Copy() Behavior {
 	return &t
 }
 
+// annotateReply pins this turn's tool-call record onto the reply the caller
+// just appended, when any tool ran. The reply's map is fresh from
+// AppendToMessages, so there is nothing to collide with and no nil to guard;
+// on a turn with no calls the annotation is absent, not empty.
+func (e *TodoListExecutive) annotateReply(reply *AnnotatedMessage) {
+	if len(e.ToolCalls) == 0 {
+		return
+	}
+	reply.Annotations[AnnotationToolCalls] = Annotation{
+		Name:        AnnotationToolCalls,
+		Data:        e.ToolCalls,
+		Explanation: "the tool calls this turn's steps made, in plan order",
+	}
+}
+
 func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	var trace Trace
 
@@ -618,9 +724,11 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 
 	sig := e.Execute(ctx, messages)
 
-	// A turn that produced a reply appends it; a turn that did not returns
-	// the list it was given, unchanged, and the failure. A pause inside is
-	// still not reported: the snapshot is how a caller finds out.
+	// A turn that produced a reply appends it, with the turn's tool-call
+	// record pinned on when any tool ran; a turn that did not returns the
+	// list it was given, unchanged, and the failure, and the record of what
+	// ran before the failure is on e.ToolCalls only. A pause inside is still
+	// not reported: the snapshot is how a caller finds out.
 	var err error
 	if es, ok := sig.(*ErrorSignal); ok {
 		err = es
@@ -629,6 +737,7 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(messages.LastMessage())
 	}
 
 	now := time.Now()
@@ -675,6 +784,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(e.History.LastMessage())
 
 		err = c.Send(&ChannelMessage{
 			Id:      cm.Id,

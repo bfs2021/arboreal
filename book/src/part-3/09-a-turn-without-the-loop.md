@@ -12,7 +12,7 @@ The per-message API has been in front of us since Chapter 8. Its section "`Call`
 
 ## The anatomy of `Call`
 
-`Call(ctx, messages)` in `executive.go` does four things. If the plan is empty, it calls `Plan(ctx, messages)`. Otherwise it takes the resume branch: for each pending step it appends `*messages.LastMessage()` — the message the caller just added — to that step's `Messages`, and no planning happens. Then `Execute(ctx, messages)`. Then it appends `e.Output` to the list as an assistant-role message and returns the list, with a signal that is always `nil`, all inside the trace envelope from Chapter 5. This is Chapter 8's twins section one level down, and the level down is where the contract lives: every read and write goes through the `messages` argument. `Call` works on the list it is given, and the executive's `History` field never appears in its body.
+`Call(ctx, messages)` in `executive.go` does four things. If the plan is empty, it calls `Plan(ctx, messages)`. Otherwise it takes the resume branch: for each pending step it appends `*messages.LastMessage()` — the message the caller just added — to that step's `Messages`, and no planning happens. Then `Execute(ctx, messages)`. Then it appends `e.Output` to the list as an assistant-role message, pinned with the `tool_calls` record when any tool ran this turn (Chapter 12), and returns the list with a `nil` signal, all inside the trace envelope from Chapter 5; a failed reply comes back as the list untouched and an `*ErrorSignal` (Chapter 8). This is Chapter 8's twins section one level down, and the level down is where the contract lives: every read and write goes through the `messages` argument. `Call` works on the list it is given, and the executive's `History` field never appears in its body.
 
 That last point deserves a table. Of the four methods on the turn path, exactly one touches `History`:
 
@@ -95,6 +95,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(e.History.LastMessage())
 
 		err = c.Send(&ChannelMessage{
 			Id:      cm.Id,
@@ -107,7 +108,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 }
 ```
 
-Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`, and if it reports a failed reply, return it as the loop's error, with `History` ending on the user's message and nothing sent; otherwise append `Output` to `History`; send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
+Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`, and if it reports a failed reply, return it as the loop's error, with `History` ending on the user's message and nothing sent; otherwise append `Output` to `History`, pinned with the turn's `tool_calls` record when any tool ran (Chapter 12); send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
 
 The `Channel` interface — `AllocateID`, `Send`, `Receive` in `channel.go` — exists for this loop style, and the framework ships two implementations: the `TerminalChannel` you have been typing into, and `TwilioSMSChannel`, which buffers webhook posts into a Go channel so that `Receive` has something to block on. This book does not cover them further.
 

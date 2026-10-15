@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zenful-ai/arboreal/llm"
 )
@@ -412,6 +414,72 @@ func pausingTree(id, text string) *BehaviorTree {
 	return &tree
 }
 
+// toolTree is a tree whose first state appends one executed tool call the
+// way LLMCompletionState's loop does (an assistant message carrying the
+// call, then a function-role message carrying the result), then replies
+// with text and finishes, or pauses when wait is true.
+func toolTree(id, tool string, args map[string]any, result, text string, wait bool) *BehaviorTree {
+	return toolTreeFrom(id, tool, func(AnnotatedMessages) (map[string]any, string) { return args, result }, text, wait)
+}
+
+// echoTree is toolTree with the call's one argument and its result taken
+// from the last message the state was given, so each turn's record is
+// distinct and a test can tell whose turn a record came from.
+func echoTree(id, tool, text string, wait bool) *BehaviorTree {
+	return toolTreeFrom(id, tool, func(history AnnotatedMessages) (map[string]any, string) {
+		said := history.LastMessage().Content
+		return map[string]any{"said": said}, "heard " + said
+	}, text, wait)
+}
+
+// toolTreeFrom is toolTree's shape with the call's arguments and result
+// computed from the history the first state is given.
+func toolTreeFrom(id, tool string, call func(AnnotatedMessages) (map[string]any, string), text string, wait bool) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "calls "+tool+" and replies with "+text, "example", id)
+	first := &BehaviorState{
+		HashId:    id + "-call",
+		StateName: "call",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			args, result := call(history)
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: tool, Arguments: args}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:    llm.ChatMessageRoleFunction,
+					Name:    tool,
+					Content: result,
+				}},
+			), nil
+		},
+	}
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	tree.AddTransition(first, reply)
+	if wait {
+		pause := PauseState("wait for the user")
+		pause.HashId = id + "-wait"
+		pause.StateName = "wait"
+		tree.AddTransition(reply, &pause)
+	}
+	return &tree
+}
+
+// delayed makes tree's first state sleep for d before it runs, so a test
+// that fans out two steps can pin which one completes last. The seeded copy
+// shares the state by pointer, so wrapping the original is enough.
+func delayed(tree *BehaviorTree, d time.Duration) *BehaviorTree {
+	first := tree.Graph.Initial().(*BehaviorState)
+	inner := first.Lambda
+	first.Lambda = func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+		time.Sleep(d)
+		return inner(ctx, history)
+	}
+	return tree
+}
+
 // replyExecutive is an executive over the given trees, with the preamble and
 // the out-of-bounds handler every executive should set.
 func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
@@ -540,6 +608,9 @@ func TestExecuteOutOfBoundsHandlerReplies(t *testing.T) {
 	}
 	if exec.Output != "out of bounds" {
 		t.Fatalf("Output = %q, want the handler's canned reply", exec.Output)
+	}
+	if n := len(exec.ToolCalls); n != 0 {
+		t.Fatalf("ToolCalls holds %d records, want none: the handler called no tool", n)
 	}
 }
 
@@ -766,5 +837,396 @@ func TestRunLoopReturnsTheFailure(t *testing.T) {
 	}
 	if ch.sends != 0 {
 		t.Fatalf("RunLoop sent %d replies on a failed turn, want none", ch.sends)
+	}
+}
+
+// toolCall is an assistant message carrying one tool call per name given,
+// each with {"q": name} as its arguments.
+func toolCall(tools ...string) AnnotatedMessage {
+	var calls []llm.ToolCall
+	for _, tool := range tools {
+		calls = append(calls, llm.ToolCall{Name: tool, Arguments: map[string]any{"q": tool}})
+	}
+	return AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleAssistant, ToolCalls: calls,
+	}}
+}
+
+// toolResult is the function-role message LLMCompletionState's loop appends
+// after executing a call to tool.
+func toolResult(tool string) AnnotatedMessage {
+	return AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleFunction, Name: tool, Content: "result of " + tool,
+	}}
+}
+
+func TestRecordToolCallsPairsResultsWithTheirCalls(t *testing.T) {
+	text := AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleAssistant, Content: "a reply",
+	}}
+	record := func(tool string) ToolCallRecord {
+		return ToolCallRecord{Step: "step", Tool: tool, Arguments: map[string]any{"q": tool}, Result: "result of " + tool}
+	}
+
+	cases := []struct {
+		name string
+		part AnnotatedMessages
+		want []ToolCallRecord
+	}{
+		{
+			name: "one pair",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "two pairs, in order",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a"), toolCall("b"), toolResult("b")},
+			want: []ToolCallRecord{record("a"), record("b")},
+		},
+		{
+			name: "a result whose predecessor names another tool is skipped",
+			part: AnnotatedMessages{toolCall("a"), toolResult("b")},
+		},
+		{
+			name: "a result at the start of the part is skipped",
+			part: AnnotatedMessages{toolResult("a"), text},
+		},
+		{
+			name: "two calls in one reply and one result: the first call",
+			part: AnnotatedMessages{toolCall("a", "b"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "a call with no result records nothing",
+			part: AnnotatedMessages{toolCall("a"), text},
+		},
+		{
+			name: "a second result after one call is not paired",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "a result naming a call that is not the first is skipped",
+			part: AnnotatedMessages{toolCall("a", "b"), toolResult("b")},
+		},
+		{
+			name: "an empty part",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recordToolCalls("step", tc.part)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("recordToolCalls = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+
+	// The record's Arguments is a copy of the call's map, not the map: the
+	// step's list and the record must not share one.
+	part := AnnotatedMessages{toolCall("a"), toolResult("a")}
+	got := recordToolCalls("step", part)
+	got[0].Arguments["q"] = "changed"
+	if part[0].ToolCalls[0].Arguments["q"] != "a" {
+		t.Fatal("the record shares the call's Arguments map; it must be a copy")
+	}
+}
+
+func TestExecuteRecordsALoneFinishedStepsCalls(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "We have one copy." {
+		t.Fatalf("Output = %q, want the step's reply as written", exec.Output)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a finished turn, want 0", n)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsEveryStepInPlanOrder(t *testing.T) {
+	noModel(t)
+	a := delayed(toolTree("tree-a", "lookup", map[string]any{"title": "Dune"}, "1 in stock", "A done", false), 20*time.Millisecond)
+	b := toolTree("tree-b", "notify", map[string]any{"to": "staff"}, "sent", "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+	in := userTurn()
+
+	// Two steps ran, so the summarizer is called and, with no token, fails:
+	// this is the failed-turn test too. tree-a sleeps, so it completes
+	// second; the record is in plan order regardless.
+	out, sig := exec.Call(modelCtx(), in)
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("Call returned %d messages, want the %d it was given: a failed turn appends no reply", len(out), len(in))
+	}
+	want := []ToolCallRecord{
+		{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"title": "Dune"}, Result: "1 in stock"},
+		{Step: "tree-b", Tool: "notify", Arguments: map[string]any{"to": "staff"}, Result: "sent"},
+	}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v, in plan order", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsTheOutOfBoundsHandlersCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-tool-handler",
+		StateName: "tool handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: "file_feedback", Arguments: map[string]any{"text": "Hello"}}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleFunction, Name: "file_feedback", Content: "issue 42",
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleAssistant, Content: "Filed as issue 42.",
+				}},
+			), nil
+		},
+	}
+	// No plan seeded: Execute goes straight to the handler.
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Filed as issue 42." {
+		t.Fatalf("Output = %q, want the handler's reply", exec.Output)
+	}
+	want := []ToolCallRecord{{Step: "tool handler", Tool: "file_feedback", Arguments: map[string]any{"text": "Hello"}, Result: "issue 42"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v with the handler's Name() as Step", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsAFailedHandlersCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-failing-tool-handler",
+		StateName: "failing tool handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: "file_feedback", Arguments: map[string]any{"text": "Hello"}}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role: llm.ChatMessageRoleFunction, Name: "file_feedback", Content: "issue 42",
+				}},
+			), &ErrorSignal{ErrorMessage: "reply failed", ErrorType: StateErrorTypeUnknown}
+		},
+	}
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	// The tool ran before the handler failed. The framework has no undo for
+	// it, so the record says that it did, on the field, while Output stays
+	// empty.
+	es, ok := sig.(*ErrorSignal)
+	if !ok || es.ErrorMessage != "reply failed" {
+		t.Fatalf("Execute returned %T (%v), want the handler's *ErrorSignal", sig, sig)
+	}
+	if exec.Output != "" {
+		t.Fatalf("Output = %q, want empty", exec.Output)
+	}
+	want := []ToolCallRecord{{Step: "failing tool handler", Tool: "file_feedback", Arguments: map[string]any{"text": "Hello"}, Result: "issue 42"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v: a failed handler's calls are recorded too", exec.ToolCalls, want)
+	}
+}
+
+// recordOn decodes the tool-call record on m, failing the test if m carries
+// none or it does not decode.
+func recordOn(t *testing.T, m *AnnotatedMessage) []ToolCallRecord {
+	t.Helper()
+	a, ok := m.Annotations[AnnotationToolCalls]
+	if !ok {
+		t.Fatalf("the message %q carries no %q annotation; it has %v", m.Content, AnnotationToolCalls, m.Annotations)
+	}
+	got, err := ToolCallsFromAnnotation(&a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestCallAttachesTheRecordToTheReply(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+	in := userTurn()
+
+	out, sig := exec.Call(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if len(out) != len(in)+1 || out.LastMessage().Content != "We have one copy." {
+		t.Fatalf("Call returned %d messages ending %q, want the input plus the reply", len(out), out.LastMessage().Content)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if got := recordOn(t, out.LastMessage()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the reply's record = %+v, want %+v", got, want)
+	}
+	for i, m := range out[:len(in)] {
+		if _, ok := m.Annotations[AnnotationToolCalls]; ok {
+			t.Fatalf("input message %d gained a %q annotation; only the reply carries it", i, AnnotationToolCalls)
+		}
+	}
+}
+
+func TestCallAttachesNoRecordWithoutCalls(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))
+	seedPlan(t, exec, "tree-a")
+
+	out, sig := exec.Call(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if _, ok := out.LastMessage().Annotations[AnnotationToolCalls]; ok {
+		t.Fatalf("the reply carries a %q annotation on a turn with no tool call; it must be absent, not empty", AnnotationToolCalls)
+	}
+	if n := len(exec.ToolCalls); n != 0 {
+		t.Fatalf("ToolCalls holds %d records, want none", n)
+	}
+}
+
+func TestAPausedStepsReplyRecordsThisTurnOnly(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(echoTree("tree-a", "lookup", "Want it held?", true))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+	wantOne := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Hello"}, Result: "heard Hello"}}
+	if !reflect.DeepEqual(exec.ToolCalls, wantOne) {
+		t.Fatalf("turn one recorded %+v, want %+v", exec.ToolCalls, wantOne)
+	}
+	firstReply := len(one) - 1
+
+	// The step is paused and kept; its list now holds turn one's call. The
+	// tree runs from its first state again on resume and calls the tool
+	// once more, so the list holds two calls, and the record must hold
+	// only the second.
+	two, sig := exec.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	wantTwo := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Yes please"}, Result: "heard Yes please"}}
+	if !reflect.DeepEqual(exec.ToolCalls, wantTwo) {
+		t.Fatalf("turn two recorded %+v, want %+v: the step's earlier turn must not be re-read", exec.ToolCalls, wantTwo)
+	}
+	if n := len(two); n != len(one)+2 {
+		t.Fatalf("turn two returned %d messages, want %d: the new user message and the reply", n, len(one)+2)
+	}
+	if got := recordOn(t, two.LastMessage()); !reflect.DeepEqual(got, wantTwo) {
+		t.Fatalf("turn two's reply carries %+v, want %+v", got, wantTwo)
+	}
+	if got := recordOn(t, &two[firstReply]); !reflect.DeepEqual(got, wantOne) {
+		t.Fatalf("turn one's reply carries %+v after turn two, want its own %+v", got, wantOne)
+	}
+}
+
+func TestARecordAfterRestoreHoldsOnlyTheNewTurn(t *testing.T) {
+	noModel(t)
+	build := func() *TodoListExecutive {
+		return replyExecutive(echoTree("tree-a", "lookup", "Want it held?", true))
+	}
+	first := build()
+	seedPlan(t, first, "tree-a")
+
+	one, sig := first.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// Between the turns: snapshot the paused executive, round-trip it
+	// through JSON as a store would, and restore into a fresh one built the
+	// same way: chapter 13's pattern, with the JSON leg a store adds.
+	snap, err := TakeSnapshot(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored Snapshot
+	if err := json.Unmarshal(b, &stored); err != nil {
+		t.Fatal(err)
+	}
+	second := build()
+	if err := stored.Restore(second); err != nil {
+		t.Fatal(err)
+	}
+
+	two, sig := second.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Yes please"}, Result: "heard Yes please"}}
+	if !reflect.DeepEqual(second.ToolCalls, want) {
+		t.Fatalf("turn two after a restore recorded %+v, want %+v: the restored step's earlier turn must not be re-read", second.ToolCalls, want)
+	}
+	if got := recordOn(t, two.LastMessage()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the reply's record = %+v, want %+v", got, want)
+	}
+}
+
+func TestRunLoopAttachesTheRecord(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+
+	ch := &oneShotChannel{}
+	err := exec.RunLoop(context.Background(), ch)
+
+	// RunLoop returns on the channel's EOF, not on a failed turn.
+	if err == nil || err.Error() != "eof" {
+		t.Fatalf("RunLoop returned %v, want the channel's eof", err)
+	}
+	if ch.sends != 1 {
+		t.Fatalf("RunLoop sent %d replies, want 1", ch.sends)
+	}
+	last := exec.History.LastMessage()
+	if last == nil || last.Role != llm.ChatMessageRoleAssistant || last.Content != "We have one copy." {
+		t.Fatalf("History ends on %+v, want the reply", last)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if got := recordOn(t, last); !reflect.DeepEqual(got, want) {
+		t.Fatalf("History's reply carries %+v, want %+v", got, want)
 	}
 }

@@ -1,6 +1,7 @@
 package arboreal
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/zenful-ai/arboreal/llm"
@@ -115,6 +116,29 @@ func AppendToMessages(messages AnnotatedMessages, message llm.ChatCompletionMess
 		ChatCompletionMessage: message,
 		Annotations:           make(map[string]Annotation),
 	})
+}
+
+// ToolCallsFromAnnotation decodes the executive's tool_calls annotation: the
+// typed slice before a JSON round trip, the generic shape after one. A nil
+// annotation decodes to nil, nil. The shape of an argument value is whatever
+// JSON gives: a number that was an int before the round trip is a float64
+// after it, and this helper does not guess.
+func ToolCallsFromAnnotation(a *Annotation) ([]ToolCallRecord, error) {
+	if a == nil {
+		return nil, nil
+	}
+	if records, ok := a.Data.([]ToolCallRecord); ok {
+		return records, nil
+	}
+	b, err := json.Marshal(a.Data)
+	if err != nil {
+		return nil, fmt.Errorf("annotation %q: %w", a.Name, err)
+	}
+	var records []ToolCallRecord
+	if err := json.Unmarshal(b, &records); err != nil {
+		return nil, fmt.Errorf("annotation %q: %w", a.Name, err)
+	}
+	return records, nil
 }
 
 //
