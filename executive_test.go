@@ -414,6 +414,55 @@ func pausingTree(id, text string) *BehaviorTree {
 	return &tree
 }
 
+// toolTree is a tree whose first state appends one executed tool call the
+// way LLMCompletionState's loop does (an assistant message carrying the
+// call, then a function-role message carrying the result), then replies
+// with text and finishes, or pauses when wait is true.
+func toolTree(id, tool string, args map[string]any, result, text string, wait bool) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "calls "+tool+" and replies with "+text, "example", id)
+	call := &BehaviorState{
+		HashId:    id + "-call",
+		StateName: "call",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			return append(history,
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:      llm.ChatMessageRoleAssistant,
+					ToolCalls: []llm.ToolCall{{Name: tool, Arguments: args}},
+				}},
+				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:    llm.ChatMessageRoleFunction,
+					Name:    tool,
+					Content: result,
+				}},
+			), nil
+		},
+	}
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	tree.AddTransition(call, reply)
+	if wait {
+		pause := PauseState("wait for the user")
+		pause.HashId = id + "-wait"
+		pause.StateName = "wait"
+		tree.AddTransition(reply, &pause)
+	}
+	return &tree
+}
+
+// delayed makes tree's first state sleep for d before it runs, so a test
+// that fans out two steps can pin which one completes last. The seeded copy
+// shares the state by pointer, so wrapping the original is enough.
+func delayed(tree *BehaviorTree, d time.Duration) *BehaviorTree {
+	first := tree.Graph.Initial().(*BehaviorState)
+	inner := first.Lambda
+	first.Lambda = func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+		time.Sleep(d)
+		return inner(ctx, history)
+	}
+	return tree
+}
+
 // replyExecutive is an executive over the given trees, with the preamble and
 // the out-of-bounds handler every executive should set.
 func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
@@ -864,4 +913,53 @@ func TestRecordToolCallsPairsResultsWithTheirCalls(t *testing.T) {
 	}
 }
 
-var _ = time.Now
+func TestExecuteRecordsALoneFinishedStepsCalls(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "We have one copy." {
+		t.Fatalf("Output = %q, want the step's reply as written", exec.Output)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a finished turn, want 0", n)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v", exec.ToolCalls, want)
+	}
+}
+
+func TestExecuteRecordsEveryStepInPlanOrder(t *testing.T) {
+	noModel(t)
+	a := delayed(toolTree("tree-a", "lookup", map[string]any{"title": "Dune"}, "1 in stock", "A done", false), 20*time.Millisecond)
+	b := toolTree("tree-b", "notify", map[string]any{"to": "staff"}, "sent", "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+	in := userTurn()
+
+	// Two steps ran, so the summarizer is called and, with no token, fails:
+	// this is the failed-turn test too. tree-a sleeps, so it completes
+	// second; the record is in plan order regardless.
+	out, sig := exec.Call(modelCtx(), in)
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("Call returned %d messages, want the %d it was given: a failed turn appends no reply", len(out), len(in))
+	}
+	want := []ToolCallRecord{
+		{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"title": "Dune"}, Result: "1 in stock"},
+		{Step: "tree-b", Tool: "notify", Arguments: map[string]any{"to": "staff"}, Result: "sent"},
+	}
+	if !reflect.DeepEqual(exec.ToolCalls, want) {
+		t.Fatalf("ToolCalls = %+v, want %+v, in plan order", exec.ToolCalls, want)
+	}
+}

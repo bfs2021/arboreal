@@ -372,11 +372,17 @@ func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGenerat
 
 	var results = make(chan *PlanResult, len(plan)+1)
 
-	for _, step := range plan {
+	// before[i] is how long step i's list was when its goroutine started.
+	// Everything the behavior appends is at that index and beyond, so a
+	// resumed step's earlier turns are never re-read.
+	before := make([]int, len(plan))
+
+	for i, step := range plan {
 		if step.ReplanTombstone {
 			continue
 		}
 
+		before[i] = len(step.Messages)
 		wg.Add(1)
 
 		go func() {
@@ -394,6 +400,17 @@ func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGenerat
 	}
 
 	wg.Wait()
+
+	// Every goroutine has returned, so each step's list is final. The
+	// records are built in plan order, not in the completion order the
+	// results channel holds, and whatever signal the step ended with.
+	for i, step := range plan {
+		if step.ReplanTombstone {
+			continue
+		}
+		e.ToolCalls = append(e.ToolCalls, recordToolCalls(step.Behavior.Name(), addedAfter(step.Messages, before[i]))...)
+	}
+
 	results <- nil
 
 	var result []PlanResult
@@ -486,14 +503,24 @@ Rephrase the following statements or questions as a single question or statement
 {{ end }}
 `
 
-// Execute runs the plan and decides the turn's reply. It writes e.Output
-// and e.plan (and, on a re-plan, rewrites the last message of messages with
-// the direction and the summaries) and returns a Signal: nil when Output
-// holds the reply, the *ErrorSignal of the out-of-bounds handler or of the
-// summarizer when the call that was to write the reply failed. On failure
-// Output is empty and e.plan holds the kept steps as a successful turn would
-// have stored them.
+// Execute runs the plan and decides the turn's reply. It writes e.Output,
+// e.ToolCalls and e.plan (and, on a re-plan, rewrites the last message of
+// messages with the direction and the summaries) and returns a Signal: nil
+// when Output holds the reply, the *ErrorSignal of the out-of-bounds handler
+// or of the summarizer when the call that was to write the reply failed. On
+// failure Output is empty and e.plan holds the kept steps as a successful
+// turn would have stored them; ToolCalls holds the calls that ran before the
+// failure either way.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
+	// One turn, one record: cleared here and nowhere else, so a re-plan's
+	// first round keeps its calls.
+	e.ToolCalls = nil
+	return e.execute(ctx, messages)
+}
+
+// execute is Execute's body. The re-plan recursion calls it, not Execute, so
+// the first round's tool-call records survive into the second round's.
+func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
 		// A turn that ends here ends like any other: the re-plan depth
 		// starts fresh next turn.
@@ -554,7 +581,7 @@ func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessa
 			e.planDepth += 1
 
 			e.Plan(ctx, messages)
-			return e.Execute(ctx, messages)
+			return e.execute(ctx, messages)
 		}
 	}
 
