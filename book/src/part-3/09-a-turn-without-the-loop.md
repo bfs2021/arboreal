@@ -95,6 +95,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(e.History.LastMessage())
 
 		err = c.Send(&ChannelMessage{
 			Id:      cm.Id,
@@ -107,7 +108,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 }
 ```
 
-Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`, and if it reports a failed reply, return it as the loop's error, with `History` ending on the user's message and nothing sent; otherwise append `Output` to `History`; send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
+Read it top to bottom: receive; append the user's message to `History`; the same plan-or-resume as `Call`, run on `e.History` instead of an argument; `Execute`, and if it reports a failed reply, return it as the loop's error, with `History` ending on the user's message and nothing sent; otherwise append `Output` to `History`, pinned with the turn's `tool_calls` record when any tool ran (Chapter 12); send. Every mechanism the loop exercises belongs to `Call`'s turn. What the loop adds is the channel and the upkeep of `History` — precisely the two things that are the caller's job everywhere else in Part III.
 
 The `Channel` interface — `AllocateID`, `Send`, `Receive` in `channel.go` — exists for this loop style, and the framework ships two implementations: the `TerminalChannel` you have been typing into, and `TwilioSMSChannel`, which buffers webhook posts into a Go channel so that `Receive` has something to block on. This book does not cover them further.
 
