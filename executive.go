@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"text/template"
@@ -31,6 +32,21 @@ type PlanResult struct {
 	Signal   Signal             `json:"signal"`
 }
 
+// ToolCallRecord is one executed tool call: the step that made it, the tool,
+// the arguments the model gave, and the text the tool answered with (the
+// Content of the function-role message the state appended, see state.go).
+type ToolCallRecord struct {
+	Step      string         `json:"step"`
+	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Result    string         `json:"result"`
+}
+
+// AnnotationToolCalls names the annotation the executive puts on the reply it
+// appends: a []ToolCallRecord of this turn's executed tool calls, in plan
+// order. Reserved, like raw_history and $context.
+const AnnotationToolCalls = "tool_calls"
+
 type TodoListExecutive struct {
 	ExecName           string
 	ExecDescription    string
@@ -55,6 +71,12 @@ type TodoListExecutive struct {
 
 	// FIXME: This shouldn't work this way
 	Output string
+
+	// ToolCalls is this turn's executed tool calls, in plan order, set by
+	// Execute alongside Output and attached by Call and RunLoop to the reply
+	// they append. Empty when no tool ran. It shares Output's side-channel
+	// shape, and its FIXME.
+	ToolCalls []ToolCallRecord
 
 	plan      []*ExecGeneratedStep
 	planDepth int
@@ -305,6 +327,44 @@ func (e *TodoListExecutive) Plan(ctx context.Context, messages AnnotatedMessages
 	if len(e.plan) == 1 && e.plan[0].ReplanTombstone {
 		e.plan = []*ExecGeneratedStep{}
 	}
+}
+
+// recordToolCalls reads the executed tool calls in part, in order: every
+// function-role message paired with the assistant message before it. That
+// pair is exactly what LLMCompletionState's loop appends; the shape is the
+// contract, so a pair a lambda state appended by hand is recorded too. A
+// reply with several ToolCalls yields one record, for the first entry, since
+// only it was executed and only it has a result.
+func recordToolCalls(step string, part AnnotatedMessages) []ToolCallRecord {
+	var out []ToolCallRecord
+	for i := 1; i < len(part); i++ {
+		result := part[i]
+		if result.Role != llm.ChatMessageRoleFunction {
+			continue
+		}
+		call := part[i-1]
+		if call.Role != llm.ChatMessageRoleAssistant || len(call.ToolCalls) == 0 || call.ToolCalls[0].Name != result.Name {
+			continue
+		}
+		out = append(out, ToolCallRecord{
+			Step:      step,
+			Tool:      result.Name,
+			Arguments: maps.Clone(call.ToolCalls[0].Arguments),
+			Result:    result.Content,
+		})
+	}
+	return out
+}
+
+// addedAfter is what a behavior appended to a list that held before
+// messages when it was called: this turn's part of a step, or the handler's
+// list past the one message it was given. A behavior that returned fewer
+// messages than it was given added nothing.
+func addedAfter(messages AnnotatedMessages, before int) AnnotatedMessages {
+	if len(messages) < before {
+		return nil
+	}
+	return messages[before:]
 }
 
 func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGeneratedStep) []PlanResult {

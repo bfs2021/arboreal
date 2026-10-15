@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zenful-ai/arboreal/llm"
 )
@@ -768,3 +770,98 @@ func TestRunLoopReturnsTheFailure(t *testing.T) {
 		t.Fatalf("RunLoop sent %d replies on a failed turn, want none", ch.sends)
 	}
 }
+
+// toolCall is an assistant message carrying one tool call per name given,
+// each with {"q": name} as its arguments.
+func toolCall(tools ...string) AnnotatedMessage {
+	var calls []llm.ToolCall
+	for _, tool := range tools {
+		calls = append(calls, llm.ToolCall{Name: tool, Arguments: map[string]any{"q": tool}})
+	}
+	return AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleAssistant, ToolCalls: calls,
+	}}
+}
+
+// toolResult is the function-role message LLMCompletionState's loop appends
+// after executing a call to tool.
+func toolResult(tool string) AnnotatedMessage {
+	return AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleFunction, Name: tool, Content: "result of " + tool,
+	}}
+}
+
+func TestRecordToolCallsPairsResultsWithTheirCalls(t *testing.T) {
+	text := AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleAssistant, Content: "a reply",
+	}}
+	record := func(tool string) ToolCallRecord {
+		return ToolCallRecord{Step: "step", Tool: tool, Arguments: map[string]any{"q": tool}, Result: "result of " + tool}
+	}
+
+	cases := []struct {
+		name string
+		part AnnotatedMessages
+		want []ToolCallRecord
+	}{
+		{
+			name: "one pair",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "two pairs, in order",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a"), toolCall("b"), toolResult("b")},
+			want: []ToolCallRecord{record("a"), record("b")},
+		},
+		{
+			name: "a result whose predecessor names another tool is skipped",
+			part: AnnotatedMessages{toolCall("a"), toolResult("b")},
+		},
+		{
+			name: "a result at the start of the part is skipped",
+			part: AnnotatedMessages{toolResult("a"), text},
+		},
+		{
+			name: "two calls in one reply and one result: the first call",
+			part: AnnotatedMessages{toolCall("a", "b"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "a call with no result records nothing",
+			part: AnnotatedMessages{toolCall("a"), text},
+		},
+		{
+			name: "a second result after one call is not paired",
+			part: AnnotatedMessages{toolCall("a"), toolResult("a"), toolResult("a")},
+			want: []ToolCallRecord{record("a")},
+		},
+		{
+			name: "a result naming a call that is not the first is skipped",
+			part: AnnotatedMessages{toolCall("a", "b"), toolResult("b")},
+		},
+		{
+			name: "an empty part",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recordToolCalls("step", tc.part)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("recordToolCalls = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+
+	// The record's Arguments is a copy of the call's map, not the map: the
+	// step's list and the record must not share one.
+	part := AnnotatedMessages{toolCall("a"), toolResult("a")}
+	got := recordToolCalls("step", part)
+	got[0].Arguments["q"] = "changed"
+	if part[0].ToolCalls[0].Arguments["q"] != "a" {
+		t.Fatal("the record shares the call's Arguments map; it must be a copy")
+	}
+}
+
+var _ = time.Now
