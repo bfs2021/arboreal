@@ -419,11 +419,28 @@ func pausingTree(id, text string) *BehaviorTree {
 // call, then a function-role message carrying the result), then replies
 // with text and finishes, or pauses when wait is true.
 func toolTree(id, tool string, args map[string]any, result, text string, wait bool) *BehaviorTree {
+	return toolTreeFrom(id, tool, func(AnnotatedMessages) (map[string]any, string) { return args, result }, text, wait)
+}
+
+// echoTree is toolTree with the call's one argument and its result taken
+// from the last message the state was given, so each turn's record is
+// distinct and a test can tell whose turn a record came from.
+func echoTree(id, tool, text string, wait bool) *BehaviorTree {
+	return toolTreeFrom(id, tool, func(history AnnotatedMessages) (map[string]any, string) {
+		said := history.LastMessage().Content
+		return map[string]any{"said": said}, "heard " + said
+	}, text, wait)
+}
+
+// toolTreeFrom is toolTree's shape with the call's arguments and result
+// computed from the history the first state is given.
+func toolTreeFrom(id, tool string, call func(AnnotatedMessages) (map[string]any, string), text string, wait bool) *BehaviorTree {
 	tree := CreateBehaviorTreeWithId(id, "calls "+tool+" and replies with "+text, "example", id)
-	call := &BehaviorState{
+	first := &BehaviorState{
 		HashId:    id + "-call",
 		StateName: "call",
 		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			args, result := call(history)
 			return append(history,
 				AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
 					Role:      llm.ChatMessageRoleAssistant,
@@ -440,7 +457,7 @@ func toolTree(id, tool string, args map[string]any, result, text string, wait bo
 	reply := CannedResponseState(text)
 	reply.HashId = id + "-reply"
 	reply.StateName = "reply"
-	tree.AddTransition(call, reply)
+	tree.AddTransition(first, reply)
 	if wait {
 		pause := PauseState("wait for the user")
 		pause.HashId = id + "-wait"
@@ -1097,5 +1114,93 @@ func TestCallAttachesNoRecordWithoutCalls(t *testing.T) {
 	}
 	if n := len(exec.ToolCalls); n != 0 {
 		t.Fatalf("ToolCalls holds %d records, want none", n)
+	}
+}
+
+func TestAPausedStepsReplyRecordsThisTurnOnly(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(echoTree("tree-a", "lookup", "Want it held?", true))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+	wantOne := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Hello"}, Result: "heard Hello"}}
+	if !reflect.DeepEqual(exec.ToolCalls, wantOne) {
+		t.Fatalf("turn one recorded %+v, want %+v", exec.ToolCalls, wantOne)
+	}
+	firstReply := len(one) - 1
+
+	// The step is paused and kept; its list now holds turn one's call. The
+	// tree runs from its first state again on resume and calls the tool
+	// once more, so the list holds two calls, and the record must hold
+	// only the second.
+	two, sig := exec.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	wantTwo := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Yes please"}, Result: "heard Yes please"}}
+	if !reflect.DeepEqual(exec.ToolCalls, wantTwo) {
+		t.Fatalf("turn two recorded %+v, want %+v: the step's earlier turn must not be re-read", exec.ToolCalls, wantTwo)
+	}
+	if n := len(two); n != len(one)+2 {
+		t.Fatalf("turn two returned %d messages, want %d: the new user message and the reply", n, len(one)+2)
+	}
+	if got := recordOn(t, two.LastMessage()); !reflect.DeepEqual(got, wantTwo) {
+		t.Fatalf("turn two's reply carries %+v, want %+v", got, wantTwo)
+	}
+	if got := recordOn(t, &two[firstReply]); !reflect.DeepEqual(got, wantOne) {
+		t.Fatalf("turn one's reply carries %+v after turn two, want its own %+v", got, wantOne)
+	}
+}
+
+func TestARecordAfterRestoreHoldsOnlyTheNewTurn(t *testing.T) {
+	noModel(t)
+	build := func() *TodoListExecutive {
+		return replyExecutive(echoTree("tree-a", "lookup", "Want it held?", true))
+	}
+	first := build()
+	seedPlan(t, first, "tree-a")
+
+	one, sig := first.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// Between the turns: snapshot the paused executive, round-trip it
+	// through JSON as a store would, and restore into a fresh one built the
+	// same way: chapter 13's pattern, with the JSON leg a store adds.
+	snap, err := TakeSnapshot(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored Snapshot
+	if err := json.Unmarshal(b, &stored); err != nil {
+		t.Fatal(err)
+	}
+	second := build()
+	if err := stored.Restore(second); err != nil {
+		t.Fatal(err)
+	}
+
+	two, sig := second.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: map[string]any{"said": "Yes please"}, Result: "heard Yes please"}}
+	if !reflect.DeepEqual(second.ToolCalls, want) {
+		t.Fatalf("turn two after a restore recorded %+v, want %+v: the restored step's earlier turn must not be re-read", second.ToolCalls, want)
+	}
+	if got := recordOn(t, two.LastMessage()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the reply's record = %+v, want %+v", got, want)
 	}
 }
