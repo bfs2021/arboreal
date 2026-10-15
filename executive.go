@@ -75,7 +75,8 @@ type TodoListExecutive struct {
 	// ToolCalls is this turn's executed tool calls, in plan order, set by
 	// Execute alongside Output and attached by Call and RunLoop to the reply
 	// they append. Empty when no tool ran. It shares Output's side-channel
-	// shape, and its FIXME.
+	// shape, and its FIXME. The reply's annotation holds this same slice,
+	// not a copy.
 	ToolCalls []ToolCallRecord
 
 	plan      []*ExecGeneratedStep
@@ -509,8 +510,8 @@ Rephrase the following statements or questions as a single question or statement
 // when Output holds the reply, the *ErrorSignal of the out-of-bounds handler
 // or of the summarizer when the call that was to write the reply failed. On
 // failure Output is empty and e.plan holds the kept steps as a successful
-// turn would have stored them; ToolCalls holds the calls that ran before the
-// failure either way.
+// turn would have stored them; ToolCalls holds whatever ran, on a failed
+// turn as on a successful one.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	// One turn, one record: cleared here and nowhere else, so a re-plan's
 	// first round keeps its calls.
@@ -783,6 +784,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 			Role:    llm.ChatMessageRoleAssistant,
 			Content: e.Output,
 		})
+		e.annotateReply(e.History.LastMessage())
 
 		err = c.Send(&ChannelMessage{
 			Id:      cm.Id,

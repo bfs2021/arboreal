@@ -1204,3 +1204,29 @@ func TestARecordAfterRestoreHoldsOnlyTheNewTurn(t *testing.T) {
 		t.Fatalf("the reply's record = %+v, want %+v", got, want)
 	}
 }
+
+func TestRunLoopAttachesTheRecord(t *testing.T) {
+	noModel(t)
+	args := map[string]any{"title": "Dune"}
+	exec := replyExecutive(toolTree("tree-a", "lookup", args, "1 in stock", "We have one copy.", false))
+	seedPlan(t, exec, "tree-a")
+
+	ch := &oneShotChannel{}
+	err := exec.RunLoop(context.Background(), ch)
+
+	// RunLoop returns on the channel's EOF, not on a failed turn.
+	if err == nil || err.Error() != "eof" {
+		t.Fatalf("RunLoop returned %v, want the channel's eof", err)
+	}
+	if ch.sends != 1 {
+		t.Fatalf("RunLoop sent %d replies, want 1", ch.sends)
+	}
+	last := exec.History.LastMessage()
+	if last == nil || last.Role != llm.ChatMessageRoleAssistant || last.Content != "We have one copy." {
+		t.Fatalf("History ends on %+v, want the reply", last)
+	}
+	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
+	if got := recordOn(t, last); !reflect.DeepEqual(got, want) {
+		t.Fatalf("History's reply carries %+v, want %+v", got, want)
+	}
+}
