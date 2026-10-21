@@ -244,14 +244,14 @@ Every message the tree borrows from the transcript gets its own annotation map o
 **Shape:** a `Preamble` that pins the shape of a step's `direction`, plus a line in the receiving state's system prompt saying that some user-role messages are third-person notes from a planning system and should be treated as the user's own words. Add the `[]`-for-out-of-bounds instruction, which is the only deliberate route to the `OutOfBoundsHandler`, and — since [Chapter 14](14-putting-it-together.md) — the guard against `Re-plan` for any executive that snapshots.
 
 ```go
-exec.Preamble = "You are the assistant of a small bookstore. When writing the " +
-	"\"direction\" for a step, restate the customer's message faithfully in the " +
-	"third person, quoting it, e.g.: The customer said: \"…\". … " +
+exec.Preamble = "When writing the \"direction\" for a step, restate the user's " +
+	"message faithfully in the third person, quoting it, e.g.: The user said: \"…\". " +
+	"Never rephrase the user's words as if they were addressed to the user. " +
 	"If the message fits none of the behaviors, return an empty JSON array: []. " +
 	"Never include a Re-plan step in the plan."
 ```
 
-Remember what it costs: `interpolatedPreamble` opens the summarizer prompts as well as the planner prompt, so a restate-faithfully instruction shows through as a `The customer said: …` preface in any reply the executive writes itself, which is a merged reply of two or more steps, or the reply after a lone step failed. That is the `Preamble` being the executive's voice rather than a planner setting. ([Chapter 2](../part-1/02-anatomy-of-one-turn.md) for the drift it fixes, [Chapter 8](../part-2/08-the-executive.md) for the three jobs it does.)
+Remember what it costs: `interpolatedPreamble` opens the summarizer prompts as well as the planner prompt, so a restate-faithfully instruction shows through as a `The user said: …` preface in any reply the executive writes itself, which is a merged reply of two or more steps, or the reply after a lone step failed. That is the `Preamble` being the executive's voice rather than a planner setting. ([Chapter 2](../part-1/02-anatomy-of-one-turn.md) for the drift it fixes, [Chapter 8](../part-2/08-the-executive.md) for the three jobs it does.)
 
 ### Batched Input via Intake
 
