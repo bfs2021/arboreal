@@ -32,6 +32,33 @@ func copyStep(s Step) Step {
 	return s.Copy().(Step)
 }
 
+// openStep plans one step of b: a copy of the behavior, opened with the
+// planner's direction as a user-role message whose annotations carry
+// raw_history, the transcript at planning time, and $context.
+func openStep(b Step, direction string, transcript AnnotatedMessages) *ExecGeneratedStep {
+	annotations := make(map[string]Annotation)
+
+	annotations["raw_history"] = Annotation{
+		Data: transcript,
+	}
+	annotations["$context"] = Annotation{
+		Data: transcript.GetAnnotation("$context"),
+	}
+
+	return &ExecGeneratedStep{
+		Behavior: copyStep(b),
+		Messages: AnnotatedMessages{
+			{
+				ChatCompletionMessage: llm.ChatCompletionMessage{
+					Role:    llm.ChatMessageRoleUser,
+					Content: direction,
+				},
+				Annotations: annotations,
+			},
+		},
+	}
+}
+
 type PlanResult struct {
 	Messages AnnotatedMessages  `json:"messages"`
 	Step     *ExecGeneratedStep `json:"step"`
@@ -289,27 +316,7 @@ func (e *TodoListExecutive) Plan(ctx context.Context, messages AnnotatedMessages
 
 			for _, step := range steps {
 				if b, ok := behaviorLookup[step.Name]; ok {
-					annotations := make(map[string]Annotation)
-
-					annotations["raw_history"] = Annotation{
-						Data: messages,
-					}
-					annotations["$context"] = Annotation{
-						Data: messages.GetAnnotation("$context"),
-					}
-
-					e.plan = append(e.plan, &ExecGeneratedStep{
-						Behavior: copyStep(b),
-						Messages: AnnotatedMessages{
-							{
-								ChatCompletionMessage: llm.ChatCompletionMessage{
-									Role:    llm.ChatMessageRoleUser,
-									Content: step.Direction,
-								},
-								Annotations: annotations,
-							},
-						},
-					})
+					e.plan = append(e.plan, openStep(b, step.Direction, messages))
 				} else {
 					if strings.ToLower(step.Name) == "re-plan" {
 						e.plan = append(e.plan, &ExecGeneratedStep{

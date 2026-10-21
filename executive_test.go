@@ -1555,3 +1555,40 @@ func TestRunLoopResumesWithWhatTheStepSelects(t *testing.T) {
 		t.Fatalf("RunLoop resumed the step with %v, want %v", got, want)
 	}
 }
+
+// The tests below drive openStep, the one place Plan builds a step, without
+// the planner: Plan runs its model through LLMCompletionState, which cannot
+// be faked, so the opening logic is tested on its own.
+
+func TestOpenStepDefaultsToTheDirection(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	messages := transcript("user", "first", "user", "second")
+
+	step := openStep(tree, "the direction", messages)
+
+	if step.ReplanTombstone {
+		t.Fatal("a planned behavior is not a tombstone")
+	}
+	if step.Behavior.(*BehaviorTree) == tree {
+		t.Fatal("the step runs on the tree itself, not on a copy")
+	}
+	if got := step.Behavior.Hash(); got != "tree-a" {
+		t.Fatalf("the step's behavior is %q, want the copy of tree-a", got)
+	}
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"the direction"}) {
+		t.Fatalf("the step opened with %v, want the direction alone", got)
+	}
+	first := step.Messages[0]
+	if first.Role != llm.ChatMessageRoleUser {
+		t.Fatalf("the direction has role %q, want user", first.Role)
+	}
+	if got := first.Annotations["raw_history"].Data; !reflect.DeepEqual(got, messages) {
+		t.Fatalf("raw_history holds %v, want the transcript at planning time", got)
+	}
+	if _, ok := first.Annotations["$context"]; !ok {
+		t.Fatal("the direction carries no $context pin")
+	}
+	if n := len(first.Annotations); n != 2 {
+		t.Fatalf("the direction carries %d annotations, want the two pins only", n)
+	}
+}
