@@ -236,10 +236,11 @@ func buildExecutive() *arboreal.TodoListExecutive {
 
 	// The lookup needs the title as the customer typed it, not the planner's
 	// paraphrase of it, so the step opens with the customer's message and
-	// then the planner's direction (Chapter 8); the lookup is a tool-calling
-	// state and sees the whole list. recommend_book stays on the default and
-	// opens with the direction alone: a recommendation wants the gist, and
-	// the planner's paraphrase is the gist.
+	// then the planner's direction (Chapter 8); the lookup is not an
+	// annotation-mode state, so it reads the whole list. recommend_book
+	// stays on the default and opens with the direction alone: a
+	// recommendation wants the gist, and the planner's paraphrase is the
+	// gist.
 	availability.Opening = func(d arboreal.AnnotatedMessage, t arboreal.AnnotatedMessages) arboreal.AnnotatedMessages {
 		return append(arboreal.LastUserMessage(t), d)
 	}

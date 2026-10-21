@@ -192,9 +192,11 @@ func TestHoldRefusalLeavesTheBookOnTheShelf(t *testing.T) {
 
 // TestAvailabilityOpensWithTheCustomersWords pins the configuration the
 // lookup depends on: the availability tree opens its step with the
-// customer's message as typed and then the planner's direction (Chapter 8),
-// so the title reaches the catalog tool in the customer's words. No token:
-// Open never calls a model.
+// customer's newest message as typed and then the planner's direction
+// (Chapter 8), so the title reaches the catalog tool in the customer's
+// words. The earlier user message is there so that only LastUserMessage,
+// not TrailingUserMessages, produces the expected list. No token: Open
+// never calls a model.
 func TestAvailabilityOpensWithTheCustomersWords(t *testing.T) {
 	exec := buildExecutive()
 	var availability arboreal.Step
@@ -209,6 +211,9 @@ func TestAvailabilityOpensWithTheCustomersWords(t *testing.T) {
 
 	transcript := arboreal.AppendToMessages(nil, llm.ChatCompletionMessage{
 		Role: llm.ChatMessageRoleAssistant, Content: "I recommend Solaris.",
+	})
+	transcript = arboreal.AppendToMessages(transcript, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Thanks.",
 	})
 	transcript = arboreal.AppendToMessages(transcript, llm.ChatCompletionMessage{
 		Role: llm.ChatMessageRoleUser, Content: "Do you have The Dispossessed in stock?",
