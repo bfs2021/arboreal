@@ -228,7 +228,8 @@ The fourth line is the one the user hears. `SummaryModel` names the model for `E
 ```go
 // The lookup needs the title as the customer typed it, not the planner's
 // paraphrase of it, so the step opens with the customer's message and
-// then the planner's direction (Chapter 8).
+// then the planner's direction (Chapter 8); the lookup is not an
+// annotation-mode state, so it reads the whole list.
 availability.Opening = func(d arboreal.AnnotatedMessage, t arboreal.AnnotatedMessages) arboreal.AnnotatedMessages {
 	return append(arboreal.LastUserMessage(t), d)
 }
