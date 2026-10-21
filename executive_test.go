@@ -1559,9 +1559,9 @@ func TestRunLoopResumesWithWhatTheStepSelects(t *testing.T) {
 	}
 }
 
-// The tests below drive openStep, the one place Plan builds a behavior's step, without
-// the planner: Plan runs its model through LLMCompletionState, which cannot
-// be faked, so the opening logic is tested on its own.
+// The tests below drive openStep, the one place Plan builds a behavior's
+// step, without the planner: Plan runs its model through LLMCompletionState,
+// which cannot be faked, so the opening logic is tested on its own.
 
 func TestOpenStepDefaultsToTheDirection(t *testing.T) {
 	tree := cannedTree("tree-a", "A")

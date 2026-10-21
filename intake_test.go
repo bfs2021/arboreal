@@ -158,7 +158,6 @@ func TestBehaviorTreeOpensThroughItsOpening(t *testing.T) {
 		return marker
 	}
 	in := transcript("assistant", "hi", "user", "a", "user", "b")
-
 	direction := directionFor("the direction")
 
 	got := tree.Open(direction, in)
