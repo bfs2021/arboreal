@@ -28,6 +28,9 @@ func (b *ctxCapturingBehavior) Copy() Behavior      { return b }
 func (b *ctxCapturingBehavior) Select(transcript AnnotatedMessages) AnnotatedMessages {
 	return LastUserMessage(transcript)
 }
+func (b *ctxCapturingBehavior) Open(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages {
+	return AnnotatedMessages{direction}
+}
 
 func (b *ctxCapturingBehavior) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	b.called = true

@@ -127,3 +127,62 @@ func TestBehaviorTreeCopyKeepsTheIntake(t *testing.T) {
 		t.Fatalf("the copy selected %v, want %v: Copy() dropped Intake", got, want)
 	}
 }
+
+// directionFor builds what the executive hands Open: the planner's direction
+// as a user-role message with an empty, non-nil annotation map.
+func directionFor(content string) AnnotatedMessage {
+	return AnnotatedMessage{
+		ChatCompletionMessage: llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: content},
+		Annotations:           make(map[string]Annotation),
+	}
+}
+
+func TestBehaviorTreeOpensWithTheDirectionByDefault(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	direction := directionFor("the direction")
+
+	got := tree.Open(direction, transcript("assistant", "hi", "user", "a", "user", "b"))
+
+	if want := (AnnotatedMessages{direction}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Open = %v, want the direction alone: a tree with no Opening opens with the planner's direction", contents(got))
+	}
+}
+
+func TestBehaviorTreeOpensThroughItsOpening(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	marker := transcript("user", "marker")
+	var gotDirection AnnotatedMessage
+	var gotTranscript AnnotatedMessages
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		gotDirection, gotTranscript = d, tr
+		return marker
+	}
+	in := transcript("assistant", "hi", "user", "a", "user", "b")
+
+	got := tree.Open(directionFor("the direction"), in)
+
+	if !reflect.DeepEqual(got, marker) {
+		t.Fatalf("Open = %v, want the Opening's result unchanged", contents(got))
+	}
+	if gotDirection.Content != "the direction" {
+		t.Fatalf("the Opening was handed %q as the direction, want %q", gotDirection.Content, "the direction")
+	}
+	if !reflect.DeepEqual(gotTranscript, in) {
+		t.Fatalf("the Opening was handed %v as the transcript, want %v", contents(gotTranscript), contents(in))
+	}
+}
+
+func TestBehaviorTreeCopyKeepsTheOpening(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(_ AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return TrailingUserMessages(tr)
+	}
+
+	copied := tree.Copy().(*BehaviorTree)
+
+	// Funcs cannot be compared, so the copy is asked to open.
+	got := contents(copied.Open(directionFor("the direction"), transcript("assistant", "hi", "user", "a", "user", "b")))
+	if want := []string{"a", "b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the copy opened with %v, want %v: Copy() dropped Opening", got, want)
+	}
+}
