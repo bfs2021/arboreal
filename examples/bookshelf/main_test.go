@@ -20,7 +20,7 @@ import (
 func craftHoldSnapshot() arboreal.Snapshot {
 	direction := arboreal.AppendToMessages(nil, llm.ChatCompletionMessage{
 		Role:    llm.ChatMessageRoleUser,
-		Content: `The customer said: "Please put Solaris on hold for me."`,
+		Content: "Put Solaris on hold for the customer.",
 	})
 
 	// No "history" key: the transcript is the caller's; the seed carries
