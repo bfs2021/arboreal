@@ -17,7 +17,7 @@ Patterns are indexed by intent — what you are trying to build. Each is a named
 | Symptom | Cause | What to do | Chapter |
 |---|---|---|---|
 | A terminal-driven agent never exits on Ctrl-D, or delivers only the first piped message and then spins on empty input | `TerminalChannel.Receive` never returns an error and rebuilds a fresh `bufio.Scanner` on every call | Use `TerminalChannel` for interactive runs only and quit with Ctrl-C; implement `Channel` yourself for piped or scripted input | [Ch 1](../part-1/01-quick-start.md) |
-| A behavior's reply addresses the wrong person or drifts from what the user actually said | The behavior sees the planner's paraphrased `direction`, not the user's literal text | Add a `Preamble` telling the planner to restate the user's message faithfully, quoting it | [Ch 2](../part-1/02-anatomy-of-one-turn.md) |
+| A behavior's reply addresses the wrong person or drifts from what the user actually said | The behavior sees the planner's paraphrased `direction`, not the user's literal text | Set `Opening` on the tree that needs the words themselves (pattern: Opening with the User's Words); when the gist is right but drifts, add a `Preamble` telling the planner to restate the user's message faithfully, quoting it | [Ch 2](../part-1/02-anatomy-of-one-turn.md) |
 | A reply looks wrong even though the visible transcript looks fine | `History` (the user-facing transcript) and a step's `Messages` (what the model saw) are two different conversations | Inspect the step's `Messages`, not `History`, when a reply looks wrong | [Ch 2](../part-1/02-anatomy-of-one-turn.md) |
 | A state panics on a nil pointer the moment its lambda returns — a tree that opens with a `PauseState`, or any lambda that hands back an empty history | `BehaviorState.Call` dereferences `m.LastMessage()` after the lambda runs, which fails on an empty history | Seed the history with at least one message, or start the tree with a state that appends one | [Ch 5](../part-2/05-behaviors-and-states.md) |
 | The planner "forgets" something said several turns ago | `Plan` only renders the latest message of `History` plus up to three before it, not the whole transcript | Carry long-range context through step messages (which grow on resume) or annotations, not the planner | [Ch 8](../part-2/08-the-executive.md) |
@@ -192,7 +192,7 @@ use := arboreal.LLMCompletionState(arboreal.LLMCompletionOptions{
 tree.AddTransition(&extract, &use)
 ```
 
-Both states must be in one tree, because the annotation is pinned onto the last user-role message of the list the tree was called with, which on a fresh step is the planner's direction. Which makes the handoff per-turn: when the step completes it is dropped from the plan, and its message list, annotations and all, goes with it. Facts that must outlive the task belong on the transcript you own, not on a step. `examples/bookshelf`'s `extract-genre` → `recommend` pair is this pattern end to end; [Chapter 4](../part-2/04-messages-and-annotations.md) has both halves in detail.
+Both states must be in one tree, because the annotation is pinned onto the last user-role message of the list the tree was called with, which on a fresh step is the planner's direction, unless the tree's `Opening` put the user's words after it. Which makes the handoff per-turn: when the step completes it is dropped from the plan, and its message list, annotations and all, goes with it. Facts that must outlive the task belong on the transcript you own, not on a step. `examples/bookshelf`'s `extract-genre` → `recommend` pair is this pattern end to end; [Chapter 4](../part-2/04-messages-and-annotations.md) has both halves in detail.
 
 ### Thin Model States
 
@@ -219,9 +219,26 @@ Every knob but `RepairModel` resolves the same way: the explicit value if there 
 
 The fourth line is the one the user hears. `SummaryModel` names the model for `Execute`'s turn summary — the call that writes the reply whenever two or more steps ran, or a lone step failed — which makes it the executive's most visible call. Unlike `RepairModel` it does *not* inherit `PlannerModel`: a summary is prose for the user, not a routing decision in JSON, so tiering the planner up leaves the reply's voice on the context default until you name one, and tiering it down does not cheapen the reply behind your back. An executive with `PlannerModel` set, no `SummaryModel` and no context default still plans on the model you chose and summarizes on the fallback, the one arrangement that needs a credential you did not plan to use. Set the context default first, always; treat the three fields as adjustments to it rather than as the place where model choice lives. ([Chapter 5](../part-2/05-behaviors-and-states.md) for how a `provider:model` URI resolves, [Chapter 8](../part-2/08-the-executive.md) for the calls the executive makes without being asked.)
 
+### Opening with the User's Words
+
+**When:** a behavior that needs the record rather than the gist — a ticket that must contain what the user wrote, a title or an entry to match by its wording, a lookup whose key is the user's own phrase. The planner's `direction` is a paraphrase, and a freshly planned step opens with that paraphrase alone unless its tree says otherwise.
+
+**Shape:** set `Opening` on the tree that needs the words. It is handed the direction as a user-role message and the transcript at planning time, and returns the step's opening list; the selectors that serve `Intake` serve here too. Three forms: leave it nil for the direction alone; return `arboreal.TrailingUserMessages(t)`, or `LastUserMessage(t)`, for the user's words alone; append the direction after the selection for both. The direction goes last: the list then reads in time order, and the annotation-mode pins land on the planner's note as they do by default. Opening and resume are separate selections, so a tree that opens with the user's words still resumes through its `Intake`.
+
+```go
+// The lookup needs the title as the customer typed it, not the planner's
+// paraphrase of it, so the step opens with the customer's message and
+// then the planner's direction (Chapter 8).
+availability.Opening = func(d arboreal.AnnotatedMessage, t arboreal.AnnotatedMessages) arboreal.AnnotatedMessages {
+	return append(arboreal.LastUserMessage(t), d)
+}
+```
+
+Every message the tree borrows from the transcript gets its own annotation map on the step, so a state that pins on it writes the step's copy, not the transcript's. What the opener returns is what the step gets, direction first or the whole transcript included; only an empty return is corrected, to the direction alone. ([Chapter 8](../part-2/08-the-executive.md) for `openStep` and the ordering rule, [Chapter 14](14-putting-it-together.md) for the bookshelf's lookup, which is this fragment in place.)
+
 ### Faithful Directions via Preamble
 
-**When:** any executive whose behaviors read the user's own words — which is most of them, since a behavior never sees the transcript, only the planner's paraphrase of the latest message.
+**When:** behaviors that want the planner's gist of the request but need it kept faithful — a paraphrase that must not drift into the wrong person or drop the topic — which is what `examples/snapshot-simple`, `examples/poetry` and `examples/little-spy` want. A behavior that needs the user's words themselves sets `Opening` instead (the pattern above).
 
 **Shape:** a `Preamble` that pins the shape of a step's `direction`, plus a line in the receiving state's system prompt saying that some user-role messages are third-person notes from a planning system and should be treated as the user's own words. Add the `[]`-for-out-of-bounds instruction, which is the only deliberate route to the `OutOfBoundsHandler`, and — since [Chapter 14](14-putting-it-together.md) — the guard against `Re-plan` for any executive that snapshots.
 
