@@ -173,3 +173,38 @@ func TestToolCallsFromAnnotationAfterAJSONRoundTrip(t *testing.T) {
 		t.Fatalf("error %q does not name the annotation", err)
 	}
 }
+
+func TestCloneAnnotationsGivesTheMessageItsOwnMap(t *testing.T) {
+	shared := map[string]Annotation{"pref": {Name: "pref", Data: "paperback"}}
+	in := AnnotatedMessage{
+		ChatCompletionMessage: llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "a"},
+		Annotations:           shared,
+	}
+
+	got := cloneAnnotations(in)
+
+	if got.Role != llm.ChatMessageRoleUser || got.Content != "a" {
+		t.Fatalf("cloneAnnotations changed the chat message: %+v", got.ChatCompletionMessage)
+	}
+	if got.Annotations["pref"].Data != "paperback" {
+		t.Fatalf("the clone lost the entries: %v", got.Annotations)
+	}
+	got.Annotations["pinned"] = Annotation{Name: "pinned"}
+	if _, ok := shared["pinned"]; ok {
+		t.Fatal("the clone's map is the original's: a write on the clone reached it")
+	}
+	if in.Annotations["pref"].Data != "paperback" {
+		t.Fatal("the original lost an entry")
+	}
+}
+
+func TestCloneAnnotationsAllocatesForANilMap(t *testing.T) {
+	got := cloneAnnotations(AnnotatedMessage{})
+
+	if got.Annotations == nil {
+		t.Fatal("cloneAnnotations left a nil map; a state that pins on the message would have to allocate")
+	}
+	if n := len(got.Annotations); n != 0 {
+		t.Fatalf("the clone of a nil map holds %d entries, want 0", n)
+	}
+}

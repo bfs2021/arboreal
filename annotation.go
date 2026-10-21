@@ -23,6 +23,19 @@ type AnnotatedMessage struct {
 	Annotations map[string]Annotation
 }
 
+// cloneAnnotations returns m with its own annotation map: a new, non-nil map
+// holding the same entries. Annotation values are copied by value; an
+// Annotation.Data that is a map or a slice stays shared. The executive uses
+// it to give a step's messages maps the transcript does not share.
+func cloneAnnotations(m AnnotatedMessage) AnnotatedMessage {
+	annotations := make(map[string]Annotation, len(m.Annotations))
+	for name, annotation := range m.Annotations {
+		annotations[name] = annotation
+	}
+	m.Annotations = annotations
+	return m
+}
+
 type AnnotatedMessages []AnnotatedMessage
 
 func (a AnnotatedMessages) ChatCompletionMessages() (m []llm.ChatCompletionMessage) {
