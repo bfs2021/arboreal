@@ -30,7 +30,7 @@ Patterns are indexed by intent — what you are trying to build. Each is a named
 | Everything works until a restore comes back with no transcript | `Call` never touches `History`; nothing assigns it for you | Assign `History` yourself before or after every `Call` | [Ch 9](../part-3/09-a-turn-without-the-loop.md) |
 | A restore rarely and unreproducibly comes back at the wrong step, or with a step's messages from mid-turn | `TakeSnapshot` reads live struct fields with no locking, so a concurrent `Call` tears the read | Take exactly one snapshot, after the turn's `Call` has returned, never mid-turn | [Ch 10](../part-3/10-snapshots.md) |
 | `TakeSnapshot` returns an empty map after a turn that finished, so the file you persist has no plan and no `history` | Only a step that returned `*CollectUserInputSignal` stays pending; nothing else gives `TakeSnapshot` an executive to record | Keep the transcript of a conversation that might reopen in your own storage, not the snapshot | [Ch 10](../part-3/10-snapshots.md) |
-| After a rename or a redeploy, a returning conversation starts over as if it were new — or `Restore` panics with a nil-pointer dereference | An executive id absent from the snapshot map restores nothing; a plan step's `ref` naming an unknown behavior makes `Restore` call `.Copy()` on a nil `Behavior` | Treat every id and `ref` as schema — as stable as a database column name | [Ch 10](../part-3/10-snapshots.md) |
+| After a rename or a redeploy, a returning conversation starts over as if it were new — or `Restore` returns an error naming a `ref` | An executive id absent from the snapshot map restores nothing; a plan step's `ref` naming an unknown behavior, or one that is not a tree, makes `Restore` return an error and install nothing | Treat every id and `ref` as schema — as stable as a database column name | [Ch 10](../part-3/10-snapshots.md) |
 | `TakeSnapshot` panics mid-persist on a turn where a step paused | A kept `Re-plan` tombstone has a nil `Behavior`, and the skeleton builder calls `p.Behavior.Hash()` on it | Forbid `Re-plan` steps in the `Preamble` of any executive you snapshot, or drop tombstones from the plan before snapshotting | [Ch 14](14-putting-it-together.md) |
 | Id expectations in a test pass alone and fail in the suite, or change when a test is added above them | `ZEN_SEED_RNG` is process-wide: seed it in one test and every later `GenerateStringIdentifier` in the binary follows that sequence, so ids depend on test order | Seed in `TestMain` or not at all; better, pin ids with the `*WithId` constructors instead of predicting them | [Ch 13](../part-3/13-testing-agents.md) |
 
@@ -130,7 +130,7 @@ Every cross-reference inside a snapshot is a hash. The map is keyed by the execu
 
 The fix is to pin them, all of them, in one place. `CreateBehaviorTreeWithId` and `CreateTodoListExecutiveWithId` take the hash as an argument; `LLMCompletionOptions` has an `Id` field; and every state exposes `HashId` for plain assignment. One constructor function that builds the whole agent with every id spelled out, called unconditionally at the top of the run before anyone knows whether there is anything to restore, is the shape both `examples/snapshot-edges` and `examples/bookshelf` use.
 
-Get it wrong and you get one of two outcomes, neither of which is an error return. An executive id that no longer matches any key in the snapshot map restores nothing and reports nothing — a silent fresh start, indistinguishable from a first message. A plan step whose `ref` names a behavior the rebuilt graph does not have panics: the lookup yields a nil `Behavior` interface and `Restore` calls `.Copy()` on it. `examples/snapshot-edges` demonstrates both on purpose, as probes 3 and 4.
+Get it wrong and you get one of two outcomes, only one of which is an error return. An executive id that no longer matches any key in the snapshot map restores nothing and reports nothing — a silent fresh start, indistinguishable from a first message. A plan step whose `ref` names a behavior the rebuilt graph does not have makes `Restore` return an error naming the `ref`, with the executive left as it was. `examples/snapshot-edges` demonstrates both on purpose, as probes 3 and 4.
 
 Which is why the rule is worth stating in the strongest available terms: ids are schema. A snapshot sitting in your store references them by name, exactly as a serialized row references a column, so changing one is a migration and not a rename. If you must predict an id you did not assign — and prefer not to need to — `ZEN_SEED_RNG` seeds the generator, but it is process-wide: set it in one test and every later `GenerateStringIdentifier` call in the binary follows the seeded sequence, so id expectations start depending on test order. `TestMain` or nothing. ([Chapter 10](../part-3/10-snapshots.md) for the round trip, [Chapter 13](../part-3/13-testing-agents.md) for the knob.)
 
@@ -233,6 +233,21 @@ exec.Preamble = "You are the assistant of a small bookstore. When writing the " 
 ```
 
 Remember what it costs: `interpolatedPreamble` opens the summarizer prompts as well as the planner prompt, so a restate-faithfully instruction shows through as a `The customer said: …` preface in any reply the executive writes itself, which is a merged reply of two or more steps, or the reply after a lone step failed. That is the `Preamble` being the executive's voice rather than a planner setting. ([Chapter 2](../part-1/02-anatomy-of-one-turn.md) for the drift it fixes, [Chapter 8](../part-2/08-the-executive.md) for the three jobs it does.)
+
+### Batched Input via Intake
+
+**When:** more than one user message can arrive between two turns — a driver that polls and batches, a thread where several people answer before the agent speaks, a turn that failed and was retried from its snapshot after another message landed. The executive resumes a pending step by appending what the step's tree selects from the transcript, and the default selection is the last user message only.
+
+**Shape:** set `Intake` on the tree that owns the conversation. `arboreal.TrailingUserMessages` selects every user-role message after the last assistant-role one, so the step sees the whole batch as separate messages, each with its own annotations.
+
+```go
+tree := arboreal.CreateBehaviorTreeWithId("schedule", "Schedule a meeting", "…", "tree-schedule")
+tree.Intake = arboreal.TrailingUserMessages
+```
+
+Leave it unset where one message per turn is the rule; `LastUserMessage` is the default and the cheaper prompt. Do not concatenate messages before calling the executive to work around the default: that erases message boundaries and collapses per-message annotations onto one message. The selectors are plain functions over `AnnotatedMessages`, so a flow with a stranger rule writes its own.
+
+One edge. "Since the agent last spoke" is read off the transcript, and a failed turn leaves the transcript without a reply while its paused steps keep what they received ([Chapter 8](../part-2/08-the-executive.md)). Retry that turn on the same in-memory executive after another message has landed, and `TrailingUserMessages` hands the steps the failed turn's messages a second time, where the default hands them only the new one. A bare retry on the same transcript re-delivers the last message under either selector, as the executive always did. A driver that restores from the snapshot taken before the failure, which is what a snapshot-per-turn driver does anyway, never sees any of this.
 
 ### Restore-Seeded Plan
 

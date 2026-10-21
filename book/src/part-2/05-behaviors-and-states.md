@@ -22,7 +22,7 @@ Five methods in `behavior.go`, and `Hashable` in `structs.go` is nothing more th
 
 `Hash` is the behavior's identity. `Graph.AddNode` in `structs.go` keys its nodes by it, `BehaviorTree.Call` keys its visited-set `Traversed` by it, and snapshots (Part III) record a tree's position as a list of hashes. Two behaviors with the same hash are, to the framework, the same behavior.
 
-`Name` is how the executive matches a planner step back to a behavior (`behaviorLookup` in `executive.go`). The planner prompt itself reads `BehaviorName` and `BehaviorDescription` straight off the `BehaviorTree` struct, not through these methods — which is why only trees go in an executive's `Behaviors`: a bare `*BehaviorState` there makes `Plan` panic while rendering the prompt (Chapter 8).
+`Name` is how the executive matches a planner step back to a behavior (`behaviorLookup` in `executive.go`). The planner prompt itself reads `BehaviorName` and `BehaviorDescription` straight off the `BehaviorTree` struct, not through these methods — which is why only trees go in an executive's `Behaviors`. The field's type says so: it is a `[]Step`, where `Step` is `Behavior` plus one more one-method interface, `TranscriptSelector` — `Select(transcript AnnotatedMessages) AnnotatedMessages`, what the behavior takes from the transcript when the executive resumes it — and `*BehaviorTree` is the only type in the framework that satisfies both (Chapter 8).
 
 `Copy` produces an independent instance with the same hash. The executive calls it once per step, so concurrent steps never share one stateful tree.
 

@@ -124,20 +124,11 @@ func main() {
 	fmt.Printf("3. wrong exec id: restore err=%v, entries after=%d\n", err, len(snap2)) // err=<nil>, entries after=0
 
 	// 4. A step that references a behavior id the executive does not have.
-	// Restore's lookupMap has no entry for "tree-gone", so
-	// lookupMap[p.Ref] is a nil Behavior interface value, and calling
-	// .Copy() on it panics before Restore ever returns an error — there is
-	// no graceful "unknown ref" path, only a runtime panic.
+	// Restore's lookupMap has no entry for "tree-gone", and Restore returns
+	// an error naming the ref and installs nothing.
 	broken := build("exec-edges")
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("4. unknown step ref: panic: %v\n", r) // panic: runtime error: invalid memory address or nil pointer dereference
-			}
-		}()
-		err := craftSnapshot("exec-edges", "tree-gone").Restore(broken)
-		fmt.Printf("4. unknown step ref: err=%v\n", err)
-	}()
+	err = craftSnapshot("exec-edges", "tree-gone").Restore(broken)
+	fmt.Printf("4. unknown step ref: err=%v\n", err) // err=arboreal: plan step "tree-gone" refers to no behavior of this executive
 }
 
 // ANCHOR_END: probes

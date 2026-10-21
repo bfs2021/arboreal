@@ -44,10 +44,11 @@ type BehaviorTree struct {
     State               Stack[Behavior]   // live: the traversal stack
     Traversed           map[string]bool   // live: visited set, keyed by Hash()
     ClientID            string
+    Intake              func(AnnotatedMessages) AnnotatedMessages // what the tree takes on resume; nil = the last user message
 }
 ```
 
-The fields fall into two groups. `Graph` is what you wire: the nodes and the directed edges between them, stored in `structs.go` as a `Nodes` slice and an adjacency matrix. `State` and `Traversed` are the execution cursor: the stack of behaviors still to visit and the set of hashes visited in the current run. They are ordinary fields on the struct, which is why a tree can stop mid-walk and continue on the next call, and why one instance must never be shared between goroutines. All seven fields carry JSON tags; the two unexported fields do not, and snapshots (Part III) match behaviors by `Hash()` against a freshly built tree, so restorable trees need pinned ids.
+The fields fall into two groups. `Graph` is what you wire: the nodes and the directed edges between them, stored in `structs.go` as a `Nodes` slice and an adjacency matrix. `State` and `Traversed` are the execution cursor: the stack of behaviors still to visit and the set of hashes visited in the current run. They are ordinary fields on the struct, which is why a tree can stop mid-walk and continue on the next call, and why one instance must never be shared between goroutines. `Intake` is the third group on its own: it matters only when the tree is an executive's plan step, and Chapter 8 covers it. Seven of the eight fields carry JSON tags; `Intake` is a function and is excluded with `json:"-"`, the two unexported fields have none, and snapshots (Part III) match behaviors by `Hash()` against a freshly built tree, so restorable trees need pinned ids.
 
 `CreateBehaviorTree(name, description, example)` returns an empty shell, no nodes, with a random hash. `CreateBehaviorTreeWithId` takes the hash as a fourth argument and pins it. `AddState(s)` adds a node. `AddTransition(from, to)` adds both endpoints if they are new and records a directed edge, so you rarely need `AddState`. The first node added, by either call, is the entry point: `Graph.Initial()` returns `Nodes[0]`, and nothing else marks a start.
 

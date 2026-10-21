@@ -133,12 +133,20 @@ func arborealNewPlanner(l *lua.LState) int {
 	name := l.CheckString(1)
 	description := l.CheckString(2)
 
-	var behaviors []arboreal.Behavior
+	var behaviors []arboreal.Step
 	if l.GetTop() > 2 {
 		for i := 3; i <= l.GetTop(); i++ {
 			b := checkArborealBehavior(l, i)
 
-			behaviors = append(behaviors, b)
+			// The executive plans over steps, and a tree is the only one;
+			// a bare state would fail inside Plan, so refuse it here.
+			step, ok := b.(arboreal.Step)
+			if !ok {
+				l.ArgError(i, "a planner's behaviors must be trees")
+				return 0
+			}
+
+			behaviors = append(behaviors, step)
 		}
 	}
 

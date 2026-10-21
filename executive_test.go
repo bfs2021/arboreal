@@ -25,6 +25,9 @@ func (b *ctxCapturingBehavior) Hash() string        { return "ctx-capturing-beha
 func (b *ctxCapturingBehavior) Name() string        { return "ctx-capturing-behavior" }
 func (b *ctxCapturingBehavior) Description() string { return "records the context it is called with" }
 func (b *ctxCapturingBehavior) Copy() Behavior      { return b }
+func (b *ctxCapturingBehavior) Select(transcript AnnotatedMessages) AnnotatedMessages {
+	return LastUserMessage(transcript)
+}
 
 func (b *ctxCapturingBehavior) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	b.called = true
@@ -483,7 +486,7 @@ func delayed(tree *BehaviorTree, d time.Duration) *BehaviorTree {
 // replyExecutive is an executive over the given trees, with the preamble and
 // the out-of-bounds handler every executive should set.
 func replyExecutive(trees ...*BehaviorTree) *TodoListExecutive {
-	var behaviors []Behavior
+	var behaviors []Step
 	for _, tree := range trees {
 		behaviors = append(behaviors, tree)
 	}
@@ -1228,5 +1231,261 @@ func TestRunLoopAttachesTheRecord(t *testing.T) {
 	want := []ToolCallRecord{{Step: "tree-a", Tool: "lookup", Arguments: args, Result: "1 in stock"}}
 	if got := recordOn(t, last); !reflect.DeepEqual(got, want) {
 		t.Fatalf("History's reply carries %+v, want %+v", got, want)
+	}
+}
+
+func TestRestoreRefusesAPlanStepThatIsNotAStep(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	// cannedTree pins its one state's hash to "tree-a-reply". A plan skeleton
+	// that refers to the state instead of the tree asks Restore to make a
+	// bare state a plan step.
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{"plan": []map[string]any{{
+		"ref":              "tree-a-reply",
+		"snapshot":         map[string]any{},
+		"messages":         AnnotatedMessages{},
+		"replan_tombstone": false,
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a state as a plan step, want an error")
+	}
+	if !strings.Contains(err.Error(), "tree-a-reply") {
+		t.Fatalf("error = %q, want it to name the ref", err)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0", n)
+	}
+}
+
+func TestRestoreRefusesAnUnknownRef(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{"plan": []map[string]any{{
+		"ref":              "tree-missing",
+		"snapshot":         map[string]any{},
+		"messages":         AnnotatedMessages{},
+		"replan_tombstone": false,
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a plan step whose ref names no behavior, want an error")
+	}
+	if !strings.Contains(err.Error(), "tree-missing") {
+		t.Fatalf("error = %q, want it to name the ref", err)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0", n)
+	}
+}
+
+func TestRestoreLeavesTheExecutiveUntouchedWhenAStepIsRefused(t *testing.T) {
+	exec := replyExecutive(cannedTree("tree-a", "A"), cannedTree("tree-b", "B"))
+	// A history and a valid step come before the step whose ref names no
+	// behavior. None of it may be installed.
+	b, err := json.Marshal(map[string]any{exec.Hash(): map[string]any{
+		"history": AppendToMessages(nil, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Hello"}),
+		"plan": []map[string]any{
+			{"ref": "tree-a", "snapshot": map[string]any{}, "messages": AnnotatedMessages{}, "replan_tombstone": false},
+			{"ref": "tree-missing", "snapshot": map[string]any{}, "messages": AnnotatedMessages{}, "replan_tombstone": false},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	err = snap.Restore(exec)
+
+	if err == nil {
+		t.Fatal("Restore accepted a plan with an unknown ref, want an error")
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps after a refused restore, want 0: the valid step before the bad one must not be installed", n)
+	}
+	if n := len(exec.History); n != 0 {
+		t.Fatalf("History holds %d messages after a refused restore, want 0", n)
+	}
+}
+
+// stepFor is the pending step on the tree with the given id. Kept steps are
+// stored in completion order, so a test with two steps looks them up.
+func stepFor(t *testing.T, exec *TodoListExecutive, treeID string) *ExecGeneratedStep {
+	t.Helper()
+	for _, step := range exec.plan {
+		if !step.ReplanTombstone && step.Behavior.Hash() == treeID {
+			return step
+		}
+	}
+	t.Fatalf("no pending step on %s", treeID)
+	return nil
+}
+
+func TestCallResumesEachStepWithWhatItSelects(t *testing.T) {
+	noModel(t)
+	last := pausingTree("tree-last", "last asks")
+	all := pausingTree("tree-all", "all asks")
+	all.Intake = TrailingUserMessages
+	exec := replyExecutive(last, all)
+	seedPlan(t, exec, "tree-last", "tree-all")
+
+	// Two user messages arrived since the agent last spoke.
+	messages := transcript("assistant", "welcome", "user", "first email", "user", "second email")
+	_, sig := exec.Call(modelCtx(), messages)
+
+	// Both steps paused, so the summarizer ran and failed without a token;
+	// the plan keeps both, and each step's list records what it was
+	// resumed with: its direction, its selection, then its own reply.
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %v, want the summarizer's failure", sig)
+	}
+	if n := len(exec.plan); n != 2 {
+		t.Fatalf("plan holds %d steps, want the 2 paused ones", n)
+	}
+	got := contents(stepFor(t, exec, "tree-last").Messages)
+	want := []string{"direction for tree-last", "second email", "last asks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the default step was resumed with %v, want %v", got, want)
+	}
+	got = contents(stepFor(t, exec, "tree-all").Messages)
+	want = []string{"direction for tree-all", "first email", "second email", "all asks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the trailing step was resumed with %v, want %v", got, want)
+	}
+}
+
+func TestCallDefaultIntakeDoesNotRedeliverWhenAnotherMessageLanded(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "A asks"), pausingTree("tree-b", "B asks"))
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	// Turn 1: both steps pause, the summarizer fails, and the transcript
+	// comes back without a reply while the steps keep what they received.
+	messages := transcript("assistant", "welcome", "user", "first")
+	messages, sig := exec.Call(modelCtx(), messages)
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("turn 1 returned %v, want the summarizer's failure", sig)
+	}
+
+	// Turn 2 on the same executive with one more message. The transcript
+	// still ends on "first", so "since the agent last spoke" covers both
+	// messages, but the default selects only the newest and "first" is not
+	// delivered twice. TrailingUserMessages would deliver it again; its doc
+	// comment says so.
+	messages = AppendToMessages(messages, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "second"})
+	exec.Call(modelCtx(), messages)
+
+	got := contents(stepFor(t, exec, "tree-a").Messages)
+	want := []string{"direction for tree-a", "first", "A asks", "second", "A asks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("after a failed turn and a retry the step holds %v, want %v", got, want)
+	}
+}
+
+func TestCallTrailingIntakeRedeliversAfterAFailedTurn(t *testing.T) {
+	noModel(t)
+	a := pausingTree("tree-a", "A asks")
+	a.Intake = TrailingUserMessages
+	exec := replyExecutive(a, pausingTree("tree-b", "B asks"))
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	messages := transcript("assistant", "welcome", "user", "first")
+	messages, sig := exec.Call(modelCtx(), messages)
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("turn 1 returned %v, want the summarizer's failure", sig)
+	}
+
+	// The failed turn left no reply on the transcript, so "since the agent
+	// last spoke" still covers "first", and the trailing rule hands it to
+	// the step a second time. This pins what TrailingUserMessages' doc
+	// comment says. A driver that retries from the snapshot taken before
+	// the failure never sees it.
+	messages = AppendToMessages(messages, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "second"})
+	exec.Call(modelCtx(), messages)
+
+	got := contents(stepFor(t, exec, "tree-a").Messages)
+	want := []string{"direction for tree-a", "first", "A asks", "first", "second", "A asks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("after a failed turn and a retry the trailing step holds %v, want %v", got, want)
+	}
+}
+
+func TestCallLeavesTheTombstoneAloneOnResume(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "the question, as written"))
+	seedPlan(t, exec, "tree-a")
+	exec.plan = append(exec.plan, &ExecGeneratedStep{ReplanTombstone: true, Messages: AnnotatedMessages{}})
+
+	_, sig := exec.Call(context.Background(), transcript("assistant", "welcome", "user", "a"))
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if n := len(exec.plan); n != 2 || !exec.plan[1].ReplanTombstone {
+		t.Fatalf("kept plan = %d steps, want the paused step and the carried tombstone", n)
+	}
+	if n := len(exec.plan[1].Messages); n != 0 {
+		t.Fatalf("the tombstone took %d messages on resume, want none: it has no behavior to select", n)
+	}
+	if got := contents(exec.plan[0].Messages); !reflect.DeepEqual(got, []string{"direction for tree-a", "a", "the question, as written"}) {
+		t.Fatalf("the paused step was resumed with %v", got)
+	}
+}
+
+func TestCallResumesWithNothingWhenTheStepSelectsNothing(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "the question"))
+	seedPlan(t, exec, "tree-a")
+
+	// The transcript ends on the assistant, so the default selects nothing.
+	// The step still runs, on its previous messages alone. The old loop
+	// would have appended the assistant's message.
+	_, sig := exec.Call(context.Background(), transcript("user", "a", "assistant", "welcome"))
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	got := contents(stepFor(t, exec, "tree-a").Messages)
+	want := []string{"direction for tree-a", "the question"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the step was resumed with %v, want %v: nothing was selected", got, want)
+	}
+}
+
+func TestRunLoopResumesWithWhatTheStepSelects(t *testing.T) {
+	noModel(t)
+	tree := pausingTree("tree-a", "the question")
+	tree.Intake = TrailingUserMessages
+	exec := replyExecutive(tree)
+	seedPlan(t, exec, "tree-a")
+	// One message is already on History when the channel delivers "Hello".
+	exec.History = transcript("assistant", "welcome", "user", "first")
+
+	// The channel delivers one message and then EOF, which ends the loop.
+	_ = exec.RunLoop(context.Background(), &oneShotChannel{})
+
+	got := contents(stepFor(t, exec, "tree-a").Messages)
+	want := []string{"direction for tree-a", "first", "Hello", "the question"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunLoop resumed the step with %v, want %v", got, want)
 	}
 }

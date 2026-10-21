@@ -12,7 +12,7 @@ The per-message API has been in front of us since Chapter 8. Its section "`Call`
 
 ## The anatomy of `Call`
 
-`Call(ctx, messages)` in `executive.go` does four things. If the plan is empty, it calls `Plan(ctx, messages)`. Otherwise it takes the resume branch: for each pending step it appends `*messages.LastMessage()` — the message the caller just added — to that step's `Messages`, and no planning happens. Then `Execute(ctx, messages)`. Then it appends `e.Output` to the list as an assistant-role message, pinned with the `tool_calls` record when any tool ran this turn (Chapter 12), and returns the list with a `nil` signal, all inside the trace envelope from Chapter 5; a failed reply comes back as the list untouched and an `*ErrorSignal` (Chapter 8). This is Chapter 8's twins section one level down, and the level down is where the contract lives: every read and write goes through the `messages` argument. `Call` works on the list it is given, and the executive's `History` field never appears in its body.
+`Call(ctx, messages)` in `executive.go` does four things. If the plan is empty, it calls `Plan(ctx, messages)`. Otherwise it takes the resume branch, `resume(messages)`: for each pending step it appends what that step's tree selects from the transcript — by default the last user message, the one the caller just added — to that step's `Messages`, and no planning happens. Then `Execute(ctx, messages)`. Then it appends `e.Output` to the list as an assistant-role message, pinned with the `tool_calls` record when any tool ran this turn (Chapter 12), and returns the list with a `nil` signal, all inside the trace envelope from Chapter 5; a failed reply comes back as the list untouched and an `*ErrorSignal` (Chapter 8). This is Chapter 8's twins section one level down, and the level down is where the contract lives: every read and write goes through the `messages` argument. `Call` works on the list it is given, and the executive's `History` field never appears in its body.
 
 That last point deserves a table. Of the four methods on the turn path, exactly one touches `History`:
 
@@ -25,7 +25,7 @@ That last point deserves a table. Of the four methods on the turn path, exactly 
 
 The transcript, in other words, is the caller's job. `RunLoop` is one such caller: it appends what `Receive` returned and what `Execute` produced to `e.History` and runs the turn on that field. Without the loop, you keep the list yourself — append the user's message, hand the list to `Call`, keep what comes back. (The table is about the field. `Execute`'s re-plan path does rewrite the last message of whatever list it is handed — Chapter 8 traced that — so a caller's transcript can still be edited through the argument; but no method except `RunLoop` names `e.History`.)
 
-Could you go lower and call `Plan` and `Execute` yourself? On the first turn, yes: that pair is exactly what `Call` runs when the plan is empty, minus the envelope and the final append. From the second turn on, no, for two reasons both visible in `Plan`. First, `Plan` begins by discarding any plan in flight: its first act after rendering the planner prompt is to reset `e.plan` to an empty slice, so if a step paused last turn, calling `Plan` erases it before the planner even answers. Second, the field is `plan`, unexported. The resume branch — append the new message to each pending step's `Messages` — reads and writes state your code cannot reach from outside the package, so it cannot be written by hand at all. "Plan then Execute" is therefore a first-turn-only idiom; `Call` is that same pair with the resume branch included, and it is the only method that has one.
+Could you go lower and call `Plan` and `Execute` yourself? On the first turn, yes: that pair is exactly what `Call` runs when the plan is empty, minus the envelope and the final append. From the second turn on, no, for two reasons both visible in `Plan`. First, `Plan` begins by discarding any plan in flight: its first act after rendering the planner prompt is to reset `e.plan` to an empty slice, so if a step paused last turn, calling `Plan` erases it before the planner even answers. Second, the field is `plan`, unexported. The resume branch — append to each pending step's `Messages` what its tree selects — reads and writes state your code cannot reach from outside the package, so it cannot be written by hand at all. "Plan then Execute" is therefore a first-turn-only idiom; `Call` is that same pair with the resume branch included, and it is the only method that has one.
 
 One corner carries over from Chapter 8: `Execute` with an empty plan is not a no-op. It hands the last message to `OutOfBoundsHandler`, or, with none set, makes `Output` the literal `Please set an out-of-bounds handler, this request was unable to be planned.` — the first case of that chapter's `Execute` walkthrough. An empty plan is a routed outcome, not an idle one, and a per-message caller sends its result to the user like any other reply.
 
@@ -82,9 +82,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 		if len(e.plan) == 0 {
 			e.Plan(ctx, e.History)
 		} else {
-			for _, step := range e.plan {
-				step.Messages = append(step.Messages, *e.History.LastMessage())
-			}
+			e.resume(e.History)
 		}
 
 		if sig, ok := e.Execute(ctx, e.History).(*ErrorSignal); ok {
