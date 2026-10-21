@@ -254,11 +254,12 @@ func buildExecutive() *arboreal.TodoListExecutive {
 		&recommend, &availability, &hold,
 	)
 
-	// The Preamble (Chapter 8) does two jobs here: it authorizes an empty
-	// plan, the only deliberate route to the OutOfBoundsHandler, and it
-	// forbids the Re-plan step, which a snapshot cannot carry (Chapter 14).
-	// It no longer asks the planner to quote the customer: the one tree that
-	// needs the customer's words opens with them through its Opening.
+	// The Preamble (Chapter 8) does three jobs here: its first sentence gives
+	// the executive an identity; it authorizes an empty plan, the only
+	// deliberate route to the OutOfBoundsHandler; and it forbids the Re-plan
+	// step, which a snapshot cannot carry (Chapter 14). It does not ask the
+	// planner to quote the customer: the one tree that needs the customer's
+	// words opens with them through its Opening.
 	exec.Preamble = "You are the assistant of a small bookstore. If the message fits none " +
 		"of the behaviors, return an empty JSON array: []. Never include a Re-plan " +
 		"step in the plan."
