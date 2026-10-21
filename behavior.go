@@ -56,7 +56,9 @@ type BehaviorTree struct {
 	// words returns a selection from the transcript, alone or with the
 	// direction appended after it: the direction is the planner's note about
 	// the request and goes last, as the newest message, the way resume
-	// appends. An empty result opens with the direction alone. The executive
+	// appends. An annotation-mode state reads only the list's last user-role
+	// message, so a tree whose extractor needs the words opens with them
+	// alone. An empty result opens with the direction alone. The executive
 	// gives every message of the result its own annotation map, so an opener
 	// may return the selectors' shallow copies as they are; it must not modify
 	// the transcript. It is code, not state: snapshots do not carry it, and
