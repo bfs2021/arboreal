@@ -200,23 +200,24 @@ Both states must be in one tree, because the annotation is pinned onto the last 
 
 **Shape:** prompts in states, logic everywhere else — in lambda states and in plain functions over `AnnotatedMessages`, which test like the ordinary Go they are. `learned` in `examples/little-spy` is the reference: it walks a message list, collects the annotations the extractors wrote, normalizes the JSON shapes and skips the misses, and returns a `map[string]string` in microseconds with no model anywhere near it. `examples/bookshelf`'s hold tree is the same idea taken to its end — a canned question, a pause, and a word-scanning lambda for the answer, so the whole pause round trip runs hermetically. What is left untested is then exactly what a stub would have told you nothing about: whether the model exercises good judgment on the prompt you proved it receives. ([Chapter 13](../part-3/13-testing-agents.md).)
 
-### Tiered Planner Models
+### Tiered Executive Models
 
-**When:** an executive whose routing decision deserves a capable model and whose other calls do not. Repairing a stray comma in the planner's JSON is not a reasoning task, and it is billed like one if it runs on whatever the planner ran on.
+**When:** an executive whose own calls deserve different models. Routing wants judgment; repairing a stray comma in the planner's JSON does not, and is billed like a reasoning task if it runs on whatever the planner ran on; and the reply the user reads wants a voice chosen on purpose, not whichever model the routing happened to get.
 
-**Shape:** name the default once on the context, then raise or lower the two calls the executive makes on its own behalf. Three knobs, resolved independently per call.
+**Shape:** name the default once on the context, then raise or lower the three calls the executive makes on its own behalf. Four knobs, resolved independently per call.
 
 ```go
-ctx = arboreal.WithDefaultModel(ctx, llm.ClaudeHaiku35) // behaviors, summarizer
+ctx = arboreal.WithDefaultModel(ctx, llm.ClaudeHaiku35) // behaviors, and anything unset below
 exec.PlannerModel = llm.ClaudeSonnet4                   // routing needs the judgment
 exec.RepairModel = llm.ClaudeHaiku35                    // fixing a stray comma does not
+exec.SummaryModel = llm.ClaudeSonnet4                   // the reply the user reads
 ```
 
 The third line is the one worth reading twice. `RepairModel` does not fall back to the context default when it is empty — it inherits the *resolved planner model*, so that repair never silently runs on a model you did not name for it. Which means tiering the planner up tiers repair up with it: leave `RepairModel` unset in the example above and the repair call goes to Sonnet, not Haiku. Set it explicitly whenever `PlannerModel` differs from your default, and the saving is real, because repair only fires on malformed planner output — rarely, unpredictably, and always on a request you already paid the planner for.
 
-Each of the three resolves the same way: the explicit value if there is one, then the context default, then a built-in `openai:gpt-4o-mini` fallback that logs a deprecation warning once per process. That fallback is transitional and will be removed, so treat the warning as a build error with a grace period: an agent that never names a model is an agent whose provider was chosen for it.
+Every knob but `RepairModel` resolves the same way: the explicit value if there is one, then the context default, then a built-in `openai:gpt-4o-mini` fallback that logs a deprecation warning once per process. That fallback is transitional and will be removed, so treat the warning as a build error with a grace period: an agent that never names a model is an agent whose provider was chosen for it.
 
-Note the seam `PlannerModel` does *not* cover. It is the planning call only — `Execute`'s turn summary sets no `Model` of its own and so follows the context default like any behavior state. An executive with `PlannerModel` set and no context default plans on the model you chose and summarizes on the fallback, which is the one arrangement that still needs a credential you did not plan to use. Set the context default first, always; treat the two fields as adjustments to it rather than as the place where model choice lives. ([Chapter 5](../part-2/05-behaviors-and-states.md) for how a `provider:model` URI resolves, [Chapter 8](../part-2/08-the-executive.md) for the two calls the executive makes without being asked.)
+The fourth line is the one the user hears. `SummaryModel` names the model for `Execute`'s turn summary — the call that writes the reply whenever two or more steps ran, or a lone step failed — which makes it the executive's most visible call. Unlike `RepairModel` it does *not* inherit `PlannerModel`: a summary is prose for the user, not a routing decision in JSON, so tiering the planner up leaves the reply's voice on the context default until you name one, and tiering it down does not cheapen the reply behind your back. An executive with `PlannerModel` set, no `SummaryModel` and no context default still plans on the model you chose and summarizes on the fallback, the one arrangement that needs a credential you did not plan to use. Set the context default first, always; treat the three fields as adjustments to it rather than as the place where model choice lives. ([Chapter 5](../part-2/05-behaviors-and-states.md) for how a `provider:model` URI resolves, [Chapter 8](../part-2/08-the-executive.md) for the calls the executive makes without being asked.)
 
 ### Faithful Directions via Preamble
 
