@@ -1559,13 +1559,14 @@ func TestRunLoopResumesWithWhatTheStepSelects(t *testing.T) {
 	}
 }
 
-// The tests below drive openStep, the one place Plan builds a step, without
+// The tests below drive openStep, the one place Plan builds a behavior's step, without
 // the planner: Plan runs its model through LLMCompletionState, which cannot
 // be faked, so the opening logic is tested on its own.
 
 func TestOpenStepDefaultsToTheDirection(t *testing.T) {
 	tree := cannedTree("tree-a", "A")
 	messages := transcript("user", "first", "user", "second")
+	messages[0].Annotations["$context"] = Annotation{Name: "$context", Data: "the context"}
 
 	step := openStep(tree, "the direction", messages)
 
@@ -1588,8 +1589,8 @@ func TestOpenStepDefaultsToTheDirection(t *testing.T) {
 	if got := first.Annotations["raw_history"].Data; !reflect.DeepEqual(got, messages) {
 		t.Fatalf("raw_history holds %v, want the transcript at planning time", got)
 	}
-	if _, ok := first.Annotations["$context"]; !ok {
-		t.Fatal("the direction carries no $context pin")
+	if got := first.Annotations["$context"].Data; !reflect.DeepEqual(got, messages.GetAnnotation("$context")) {
+		t.Fatalf("$context holds %v, want what the transcript's GetAnnotation returned", got)
 	}
 	if n := len(first.Annotations); n != 2 {
 		t.Fatalf("the direction carries %d annotations, want the two pins only", n)

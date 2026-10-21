@@ -159,13 +159,15 @@ func TestBehaviorTreeOpensThroughItsOpening(t *testing.T) {
 	}
 	in := transcript("assistant", "hi", "user", "a", "user", "b")
 
-	got := tree.Open(directionFor("the direction"), in)
+	direction := directionFor("the direction")
+
+	got := tree.Open(direction, in)
 
 	if !reflect.DeepEqual(got, marker) {
 		t.Fatalf("Open = %v, want the Opening's result unchanged", contents(got))
 	}
-	if gotDirection.Content != "the direction" {
-		t.Fatalf("the Opening was handed %q as the direction, want %q", gotDirection.Content, "the direction")
+	if !reflect.DeepEqual(gotDirection, direction) {
+		t.Fatalf("the Opening was handed %+v as the direction, want the message Open was given", gotDirection)
 	}
 	if !reflect.DeepEqual(gotTranscript, in) {
 		t.Fatalf("the Opening was handed %v as the transcript, want %v", contents(gotTranscript), contents(in))
