@@ -32,30 +32,46 @@ func copyStep(s Step) Step {
 	return s.Copy().(Step)
 }
 
-// openStep plans one step of b: a copy of the behavior, opened with the
-// planner's direction as a user-role message whose annotations carry
-// raw_history, the transcript at planning time, and $context.
+// openStep builds the planned step for b: a copy of the behavior, opened
+// with what it selects from the direction and the transcript. The result's
+// messages own their annotation maps, and the first carries raw_history and
+// $context.
 func openStep(b Step, direction string, transcript AnnotatedMessages) *ExecGeneratedStep {
-	annotations := make(map[string]Annotation)
+	behavior := copyStep(b)
 
-	annotations["raw_history"] = Annotation{
+	directionMessage := AnnotatedMessage{
+		ChatCompletionMessage: llm.ChatCompletionMessage{
+			Role:    llm.ChatMessageRoleUser,
+			Content: direction,
+		},
+		Annotations: make(map[string]Annotation),
+	}
+
+	opening := behavior.Open(directionMessage, transcript)
+	if len(opening) == 0 {
+		// A step never opens empty: states dereference the list's last
+		// message, and a nil there is a crash inside executePlan's goroutine.
+		opening = AnnotatedMessages{directionMessage}
+	}
+
+	// A new list of messages with their own maps, so that neither an opener
+	// that returns the selectors' shallow copies nor one that returns a
+	// sub-slice of the transcript leaves the step sharing a map with it.
+	messages := make(AnnotatedMessages, 0, len(opening))
+	for _, m := range opening {
+		messages = append(messages, cloneAnnotations(m))
+	}
+
+	messages[0].Annotations["raw_history"] = Annotation{
 		Data: transcript,
 	}
-	annotations["$context"] = Annotation{
+	messages[0].Annotations["$context"] = Annotation{
 		Data: transcript.GetAnnotation("$context"),
 	}
 
 	return &ExecGeneratedStep{
-		Behavior: copyStep(b),
-		Messages: AnnotatedMessages{
-			{
-				ChatCompletionMessage: llm.ChatCompletionMessage{
-					Role:    llm.ChatMessageRoleUser,
-					Content: direction,
-				},
-				Annotations: annotations,
-			},
-		},
+		Behavior: behavior,
+		Messages: messages,
 	}
 }
 

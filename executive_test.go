@@ -1596,3 +1596,88 @@ func TestOpenStepDefaultsToTheDirection(t *testing.T) {
 		t.Fatalf("the direction carries %d annotations, want the two pins only", n)
 	}
 }
+
+func TestOpenStepHandsTheOpenerTheDirectionAndTheTranscript(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	var gotDirection AnnotatedMessage
+	var gotTranscript AnnotatedMessages
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		gotDirection, gotTranscript = d, tr
+		return AnnotatedMessages{d}
+	}
+	messages := transcript("assistant", "hi", "user", "the words")
+
+	openStep(tree, "the direction", messages)
+
+	if gotDirection.Role != llm.ChatMessageRoleUser || gotDirection.Content != "the direction" {
+		t.Fatalf("the opener was handed %+v, want a user-role message holding the direction", gotDirection.ChatCompletionMessage)
+	}
+	if gotDirection.Annotations == nil || len(gotDirection.Annotations) != 0 {
+		t.Fatalf("the direction reached the opener with annotations %v, want an empty, non-nil map: the pins land after the opening", gotDirection.Annotations)
+	}
+	if !reflect.DeepEqual(gotTranscript, messages) {
+		t.Fatalf("the opener was handed %v, want the transcript", contents(gotTranscript))
+	}
+}
+
+func TestOpenStepGivesBorrowedMessagesTheirOwnMaps(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return append(TrailingUserMessages(tr), d)
+	}
+	messages := transcript("user", "first", "user", "second")
+	messages[0].Annotations["pref"] = Annotation{Name: "pref", Data: "paperback"}
+	messages[1].Annotations = nil
+
+	step := openStep(tree, "the direction", messages)
+
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"first", "second", "the direction"}) {
+		t.Fatalf("the step opened with %v, want the user's words then the direction", got)
+	}
+	first := step.Messages[0]
+	if _, ok := first.Annotations["raw_history"]; !ok {
+		t.Fatal("raw_history is not on the step's first message")
+	}
+	if _, ok := first.Annotations["$context"]; !ok {
+		t.Fatal("$context is not on the step's first message")
+	}
+	if first.Annotations["pref"].Data != "paperback" {
+		t.Fatal("the transcript message's own annotation did not come along")
+	}
+	for i, m := range step.Messages[1:] {
+		if _, ok := m.Annotations["raw_history"]; ok {
+			t.Fatalf("raw_history is pinned on message %d too; it belongs on the first only", i+1)
+		}
+		if _, ok := m.Annotations["$context"]; ok {
+			t.Fatalf("$context is pinned on message %d too; it belongs on the first only", i+1)
+		}
+	}
+
+	// A state that pins an annotation on any of the step's messages writes
+	// the step's own map; the transcript must not see it.
+	for i := range step.Messages {
+		step.Messages[i].Annotations["pinned"] = Annotation{Name: "pinned"}
+	}
+	if got := len(messages[0].Annotations); got != 1 {
+		t.Fatalf("the transcript's first message now holds %d annotations, want only pref: the step shares its map", got)
+	}
+	if messages[1].Annotations != nil {
+		t.Fatal("the transcript's second message gained a map: the step wrote through to the transcript")
+	}
+}
+
+func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(AnnotatedMessage, AnnotatedMessages) AnnotatedMessages { return nil }
+	messages := transcript("user", "first", "user", "second")
+
+	got := openStep(tree, "the direction", messages)
+	want := openStep(cannedTree("tree-a", "A"), "the direction", messages)
+
+	if !reflect.DeepEqual(got.Messages, want.Messages) {
+		t.Fatalf("an empty opening produced %v, want the default's %v", contents(got.Messages), contents(want.Messages))
+	}
+	if n := len(got.Messages[0].Annotations); n != 2 {
+		t.Fatalf("the fallback direction carries %d annotations, want the two pins only", n)
+	}
+}
