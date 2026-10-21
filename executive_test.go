@@ -1666,18 +1666,55 @@ func TestOpenStepGivesBorrowedMessagesTheirOwnMaps(t *testing.T) {
 	}
 }
 
-func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
+func TestOpenStepLeavesTheTranscriptsOwnSliceAlone(t *testing.T) {
 	tree := cannedTree("tree-a", "A")
-	tree.Opening = func(AnnotatedMessage, AnnotatedMessages) AnnotatedMessages { return nil }
-	messages := transcript("user", "first", "user", "second")
-
-	got := openStep(tree, "the direction", messages)
-	want := openStep(cannedTree("tree-a", "A"), "the direction", messages)
-
-	if !reflect.DeepEqual(got.Messages, want.Messages) {
-		t.Fatalf("an empty opening produced %v, want the default's %v", contents(got.Messages), contents(want.Messages))
+	// An opener may hand back a sub-slice of the transcript itself rather
+	// than a selector's new slice. The clones must still go into the step's
+	// own list; written back in place, they would swap the transcript
+	// message's map for the step's and pin raw_history onto the transcript.
+	tree.Opening = func(_ AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return tr[len(tr)-1:]
 	}
-	if n := len(got.Messages[0].Annotations); n != 2 {
-		t.Fatalf("the fallback direction carries %d annotations, want the two pins only", n)
+	messages := transcript("user", "first", "user", "second")
+	messages[1].Annotations = nil
+
+	step := openStep(tree, "the direction", messages)
+
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"second"}) {
+		t.Fatalf("the step opened with %v, want the transcript's last message alone", got)
+	}
+	if step.Messages[0].Annotations == nil {
+		t.Fatal("the step's message has no map of its own")
+	}
+	// Do not print the transcript's map on failure: in the in-place case it
+	// holds raw_history, a slice that contains the message itself.
+	if messages[1].Annotations != nil {
+		t.Fatal("the transcript's message had its map replaced: the clones were written into the opener's slice")
+	}
+}
+
+func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		opening AnnotatedMessages
+	}{
+		{"nil", nil},
+		{"empty", AnnotatedMessages{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := cannedTree("tree-a", "A")
+			tree.Opening = func(AnnotatedMessage, AnnotatedMessages) AnnotatedMessages { return c.opening }
+			messages := transcript("user", "first", "user", "second")
+
+			got := openStep(tree, "the direction", messages)
+			want := openStep(cannedTree("tree-a", "A"), "the direction", messages)
+
+			if !reflect.DeepEqual(got.Messages, want.Messages) {
+				t.Fatalf("an empty opening produced %v, want the default's %v", contents(got.Messages), contents(want.Messages))
+			}
+			if n := len(got.Messages[0].Annotations); n != 2 {
+				t.Fatalf("the fallback direction carries %d annotations, want the two pins only", n)
+			}
+		})
 	}
 }
