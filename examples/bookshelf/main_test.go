@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/zenful-ai/arboreal"
@@ -186,5 +187,43 @@ func TestHoldRefusalLeavesTheBookOnTheShelf(t *testing.T) {
 	h, _ = tree.Call(ctx, h)
 	if got := h.LastMessage().Content; got != holdSkipped {
 		t.Fatalf("refusal replied %q, want %q", got, holdSkipped)
+	}
+}
+
+// TestAvailabilityOpensWithTheCustomersWords pins the configuration the
+// lookup depends on: the availability tree opens its step with the
+// customer's message as typed and then the planner's direction (Chapter 8),
+// so the title reaches the catalog tool in the customer's words. No token:
+// Open never calls a model.
+func TestAvailabilityOpensWithTheCustomersWords(t *testing.T) {
+	exec := buildExecutive()
+	var availability arboreal.Step
+	for _, b := range exec.Behaviors {
+		if b.Name() == "check_availability" {
+			availability = b
+		}
+	}
+	if availability == nil {
+		t.Fatal("no check_availability behavior on the executive")
+	}
+
+	transcript := arboreal.AppendToMessages(nil, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleAssistant, Content: "I recommend Solaris.",
+	})
+	transcript = arboreal.AppendToMessages(transcript, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Do you have The Dispossessed in stock?",
+	})
+	direction := arboreal.AppendToMessages(nil, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Check whether The Dispossessed is in stock.",
+	})[0]
+
+	var got []string
+	for _, m := range availability.Open(direction, transcript) {
+		got = append(got, m.Content)
+	}
+
+	want := []string{"Do you have The Dispossessed in stock?", "Check whether The Dispossessed is in stock."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("check_availability opens with %v, want the customer's message then the direction %v", got, want)
 	}
 }
