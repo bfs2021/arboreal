@@ -151,7 +151,9 @@ type TodoListExecutive struct {
 	// order first seen in plan order, set by Execute beside Output and
 	// ToolCalls and attached by Call and RunLoop to the reply they append,
 	// each under its name. Empty when nothing crossed. It shares Output's
-	// side-channel shape, and its FIXME.
+	// side-channel shape, and its FIXME. The reply's annotations hold these
+	// values, Cross.Enabled still set; a Data that is a map or slice is
+	// shared with the step's pin, not copied.
 	Crossed []Annotation
 
 	// crossOps is what Execute resolved while folding Crossed (cross,
@@ -816,18 +818,27 @@ func (e *TodoListExecutive) Copy() Behavior {
 	return &t
 }
 
-// annotateReply pins this turn's tool-call record onto the reply the caller
-// just appended, when any tool ran. The reply's map is fresh from
-// AppendToMessages, so there is nothing to collide with and no nil to guard;
-// on a turn with no calls the annotation is absent, not empty.
+// annotateReply pins this turn's tool-call record and crossed annotations
+// onto the reply the caller just appended. The reply's map is fresh from
+// AppendToMessages, so there is nothing to collide with and no nil to
+// guard. On a turn with no calls the record is absent, not empty, and no
+// crossed annotation can be under its name, which is reserved. A crossed
+// annotation lands as the fold left it, Cross and all: the mark tells a
+// later reader the pin came from a step, and JSON drops the Merge. The mark
+// is cleared again wherever the reply enters a step (forStep), so a later
+// step never re-crosses it; an executive nested inside a step's tree is
+// the exception, since its reply lands in the outer step's own part, and
+// the outer executive crosses those marks again under its own plan order.
 func (e *TodoListExecutive) annotateReply(reply *AnnotatedMessage) {
-	if len(e.ToolCalls) == 0 {
-		return
+	if len(e.ToolCalls) > 0 {
+		reply.Annotations[AnnotationToolCalls] = Annotation{
+			Name:        AnnotationToolCalls,
+			Data:        e.ToolCalls,
+			Explanation: "the tool calls this turn's steps made, in plan order",
+		}
 	}
-	reply.Annotations[AnnotationToolCalls] = Annotation{
-		Name:        AnnotationToolCalls,
-		Data:        e.ToolCalls,
-		Explanation: "the tool calls this turn's steps made, in plan order",
+	for _, a := range e.Crossed {
+		reply.Annotations[a.Name] = a
 	}
 }
 
@@ -881,10 +892,11 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 	sig := e.Execute(ctx, messages)
 
 	// A turn that produced a reply appends it, with the turn's tool-call
-	// record pinned on when any tool ran; a turn that did not returns the
-	// list it was given, unchanged, and the failure, and the record of what
-	// ran before the failure is on e.ToolCalls only. A pause inside is still
-	// not reported: the snapshot is how a caller finds out.
+	// record pinned on when any tool ran and every annotation the steps
+	// marked to cross; a turn that did not returns the list it was given,
+	// unchanged, and the failure, and what ran and crossed before the
+	// failure is on e.ToolCalls and e.Crossed only. A pause inside is
+	// still not reported: the snapshot is how a caller finds out.
 	var err error
 	if es, ok := sig.(*ErrorSignal); ok {
 		err = es
