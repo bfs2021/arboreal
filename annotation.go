@@ -23,8 +23,10 @@ type Crossing struct {
 	// Merge is called when another step crossed the same name in the same
 	// turn, in plan order, as (mine, theirs) on the annotation already
 	// placed, and returns the Data to keep. Nil keeps mine: the first step
-	// to cross a name wins. Only consulted when Enabled. Not stored: the
-	// merge happens within the turn, before any snapshot or transcript is
+	// to cross a name wins. Only consulted when Enabled. It must not mutate
+	// mine or theirs in place, since both may still be a step's own pin or
+	// the transcript's; it returns a new value. Not stored: the merge
+	// happens within the turn, before any snapshot or transcript is
 	// written, and on the transcript the value is a result.
 	Merge func(mine, theirs any) any `json:"-"`
 }

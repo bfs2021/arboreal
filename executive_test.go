@@ -1790,3 +1790,295 @@ func TestOpenStepClearsTheCrossOnBorrowedMessages(t *testing.T) {
 		t.Fatal("the transcript's own pin lost its Cross; the clone must not write back")
 	}
 }
+
+// lastUserIndex is the index of the last user-role message in history, or
+// of the last message when there is none: where an annotation-mode
+// LLMCompletionState pins (state.go), and on a resumed step the message the
+// executive appended this turn.
+func lastUserIndex(history AnnotatedMessages) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == llm.ChatMessageRoleUser {
+			return i
+		}
+	}
+	return len(history) - 1
+}
+
+// pinningTreeFrom is a tree whose first state writes pin(history) onto the
+// list's last user message, under the annotation's Name, then replies with
+// text and finishes, or pauses when wait is true. It stands in for any
+// state that marks a pin: the executive reads the mark, not the state.
+func pinningTreeFrom(id string, pin func(AnnotatedMessages) Annotation, text string, wait bool) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "pins an annotation and replies with "+text, "example", id)
+	first := &BehaviorState{
+		HashId:    id + "-pin",
+		StateName: "pin",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			a := pin(history)
+			history[lastUserIndex(history)].Annotations[a.Name] = a
+			return history, nil
+		},
+	}
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	tree.AddTransition(first, reply)
+	if wait {
+		pause := PauseState("wait for the user")
+		pause.HashId = id + "-wait"
+		pause.StateName = "wait"
+		tree.AddTransition(reply, &pause)
+	}
+	return &tree
+}
+
+// pinningTree is pinningTreeFrom with one fixed annotation.
+func pinningTree(id string, a Annotation, text string, wait bool) *BehaviorTree {
+	return pinningTreeFrom(id, func(AnnotatedMessages) Annotation { return a }, text, wait)
+}
+
+// echoPinTree pins, marked to cross, under name plus ":" plus the last
+// message's content, with "heard " plus that content as Data, so each
+// turn's pin has a name and a value of its own: a test can tell whose turn
+// a crossed value came from, and an earlier turn's pin crossed again shows
+// up as a second entry instead of hiding behind the newer one.
+func echoPinTree(id, name, text string, wait bool) *BehaviorTree {
+	return pinningTreeFrom(id, func(history AnnotatedMessages) Annotation {
+		said := history.LastMessage().Content
+		return Annotation{Name: name + ":" + said, Data: "heard " + said, Cross: Crossing{Enabled: true}}
+	}, text, wait)
+}
+
+func TestExecuteCrossesAMarkedAnnotation(t *testing.T) {
+	noModel(t)
+	pin := Annotation{Name: "conflict_outcome", Data: "resolved", Explanation: "the user accepted", Cross: Crossing{Enabled: true}}
+	exec := replyExecutive(pinningTree("tree-a", pin, "Glad that is settled.", false))
+	seedPlan(t, exec, "tree-a")
+
+	// Execute alone does not resume, so the step's list is its one
+	// direction, the pin lands there, and turnStart is 0: the part of a
+	// step planned this turn is its whole list.
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Glad that is settled." {
+		t.Fatalf("Output = %q, want the step's reply", exec.Output)
+	}
+	if n := len(exec.Crossed); n != 1 {
+		t.Fatalf("Crossed holds %d annotations, want 1: %+v", n, exec.Crossed)
+	}
+	got := exec.Crossed[0]
+	if got.Name != pin.Name || got.Data != pin.Data || got.Explanation != pin.Explanation || !got.Cross.Enabled {
+		t.Fatalf("Crossed[0] = %+v, want the pin as written", got)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps, want 0: the step finished and was dropped", n)
+	}
+}
+
+func TestTwoStepsMergeThroughTheFirstsMerge(t *testing.T) {
+	noModel(t)
+	sum := func(mine, theirs any) any { return mine.(int) + theirs.(int) }
+	a := delayed(pinningTree("tree-a", Annotation{Name: "count", Data: 1, Explanation: "A's count", Cross: Crossing{Enabled: true, Merge: sum}}, "A done", false), 20*time.Millisecond)
+	b := pinningTree("tree-b", Annotation{Name: "count", Data: 2, Explanation: "B's count", Cross: Crossing{Enabled: true, Merge: KeepLast}}, "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+	in := userTurn()
+
+	// Two steps ran, so the summarizer is called and, with no token, fails:
+	// this is the failed-turn test too. tree-a sleeps, so it completes
+	// second; the fold is in plan order regardless, tree-a owns the slot
+	// and its Merge decides, and tree-b's KeepLast is never consulted.
+	var out AnnotatedMessages
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		out, sig = exec.Call(ctx, in)
+	})
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("Call returned %d messages, want the %d it was given: a failed turn appends no reply", len(out), len(in))
+	}
+	if n := len(exec.Crossed); n != 1 {
+		t.Fatalf("Crossed holds %d annotations, want 1: %+v", n, exec.Crossed)
+	}
+	got := exec.Crossed[0]
+	if got.Name != "count" || got.Data != 3 {
+		t.Fatalf("Crossed[0] = %+v, want count = 3, the sum in plan order", got)
+	}
+	if got.Explanation != "A's count" {
+		t.Fatalf("Explanation = %q, want the first step's", got.Explanation)
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	want := []struct {
+		action string
+		data   any
+	}{{"cross", 1}, {"merge", 3}}
+	if len(end.Operations) != len(want) {
+		t.Fatalf("the executive's end_call carries %d operations, want %d: %+v", len(end.Operations), len(want), end.Operations)
+	}
+	for i, op := range end.Operations {
+		if op.Type != "annotation" || op.Action != want[i].action || op.Annotation == nil || op.Annotation.Name != "count" || op.Annotation.Data != want[i].data {
+			t.Fatalf("operation %d = %+v (annotation %+v), want %s of count = %v", i, op, op.Annotation, want[i].action, want[i].data)
+		}
+	}
+}
+
+func TestTwoStepsWithoutMergeKeepTheFirst(t *testing.T) {
+	noModel(t)
+	a := delayed(pinningTree("tree-a", Annotation{Name: "verdict", Data: "A's", Cross: Crossing{Enabled: true}}, "A done", false), 20*time.Millisecond)
+	b := pinningTree("tree-b", Annotation{Name: "verdict", Data: "B's", Cross: Crossing{Enabled: true}}, "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		_, sig = exec.Call(ctx, userTurn())
+	})
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Data != "A's" {
+		t.Fatalf("Crossed = %+v, want one verdict holding A's: without a Merge the first in plan order stands", exec.Crossed)
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	want := []struct {
+		action string
+		data   any
+	}{{"cross", "A's"}, {"keep", "B's"}}
+	if len(end.Operations) != len(want) {
+		t.Fatalf("the executive's end_call carries %d operations, want %d: %+v", len(end.Operations), len(want), end.Operations)
+	}
+	for i, op := range end.Operations {
+		if op.Type != "annotation" || op.Action != want[i].action || op.Annotation == nil || op.Annotation.Name != "verdict" || op.Annotation.Data != want[i].data {
+			t.Fatalf("operation %d = %+v (annotation %+v), want %s of verdict = %v", i, op, op.Annotation, want[i].action, want[i].data)
+		}
+	}
+}
+
+func TestAReservedNameIsNeverCrossed(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pinningTree("tree-a", Annotation{Name: "raw_history", Data: "not the transcript", Cross: Crossing{Enabled: true}}, "A done", false))
+	seedPlan(t, exec, "tree-a")
+
+	var out AnnotatedMessages
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		out, sig = exec.Call(ctx, userTurn())
+	})
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil: a reserved name is skipped, not an error", sig)
+	}
+	if n := len(exec.Crossed); n != 0 {
+		t.Fatalf("Crossed = %+v, want nothing: raw_history never crosses", exec.Crossed)
+	}
+	if _, ok := out.LastMessage().Annotations["raw_history"]; ok {
+		t.Fatal("the reply carries raw_history")
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	if len(end.Operations) != 1 {
+		t.Fatalf("the executive's end_call carries %d operations, want 1: %+v", len(end.Operations), end.Operations)
+	}
+	op := end.Operations[0]
+	if op.Type != "annotation" || op.Action != "skip" || op.Annotation == nil || op.Annotation.Name != "raw_history" {
+		t.Fatalf("operation = %+v (annotation %+v), want skip of raw_history", op, op.Annotation)
+	}
+}
+
+func TestTheHandlersAnnotationsCross(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-pinning-handler",
+		StateName: "pinning handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			// On the one message the handler was given, where an
+			// annotation-mode state would write.
+			history[0].Annotations["feedback_filed"] = Annotation{Name: "feedback_filed", Data: "issue 42", Cross: Crossing{Enabled: true}}
+			return append(history, AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+				Role: llm.ChatMessageRoleAssistant, Content: "Filed as issue 42.",
+			}}), nil
+		},
+	}
+	in := userTurn()
+	// No plan seeded: Execute goes straight to the handler.
+
+	sig := exec.Execute(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Filed as issue 42." {
+		t.Fatalf("Output = %q, want the handler's reply", exec.Output)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Name != "feedback_filed" || exec.Crossed[0].Data != "issue 42" {
+		t.Fatalf("Crossed = %+v, want one feedback_filed holding issue 42", exec.Crossed)
+	}
+	// The handler was handed a copy with a fresh map; the caller's message
+	// is untouched, and the pin reaches the transcript only through Crossed.
+	if _, ok := in[0].Annotations["feedback_filed"]; ok {
+		t.Fatal("the handler's pin landed on the caller's message")
+	}
+}
+
+func TestTheNewestPinOfANameDecidesWhetherItCrosses(t *testing.T) {
+	noModel(t)
+	// A state pins "verdict" twice in one turn: marked on the user's message,
+	// then again on a message it appends. The newest pin is the step's value,
+	// as GetAnnotation reads it, so it alone decides whether, and what,
+	// crosses; the older marked pin is never read.
+	for _, c := range []struct {
+		name  string
+		newer Crossing
+		want  []any
+	}{
+		{"marked again, the newer value crosses", Crossing{Enabled: true}, []any{"new"}},
+		{"unmarked again, nothing crosses", Crossing{}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := CreateBehaviorTreeWithId("tree-a", "pins verdict twice", "example", "tree-a")
+			pin := &BehaviorState{
+				HashId:    "tree-a-pin",
+				StateName: "pin",
+				Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+					history[lastUserIndex(history)].Annotations["verdict"] = Annotation{Name: "verdict", Data: "old", Cross: Crossing{Enabled: true}}
+					history = AppendToMessages(history, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleAssistant, Content: "thinking"})
+					history.LastMessage().Annotations["verdict"] = Annotation{Name: "verdict", Data: "new", Cross: c.newer}
+					return history, nil
+				},
+			}
+			reply := CannedResponseState("Done.")
+			reply.HashId = "tree-a-reply"
+			reply.StateName = "reply"
+			tree.AddTransition(pin, reply)
+			exec := replyExecutive(&tree)
+			seedPlan(t, exec, "tree-a")
+
+			if sig := exec.Execute(context.Background(), userTurn()); sig != nil {
+				t.Fatalf("Execute returned %v, want nil", sig)
+			}
+			var got []any
+			for _, a := range exec.Crossed {
+				got = append(got, a.Data)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("Crossed data = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

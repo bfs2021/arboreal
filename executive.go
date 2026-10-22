@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -145,6 +146,17 @@ type TodoListExecutive struct {
 	// shape, and its FIXME. The reply's annotation holds this same slice,
 	// not a copy.
 	ToolCalls []ToolCallRecord
+
+	// Crossed is this turn's crossed annotations, one per name, in the
+	// order first seen in plan order, set by Execute beside Output and
+	// ToolCalls and attached by Call and RunLoop to the reply they append,
+	// each under its name. Empty when nothing crossed. It shares Output's
+	// side-channel shape, and its FIXME.
+	Crossed []Annotation
+
+	// crossOps is what Execute resolved while folding Crossed (cross,
+	// merge, keep, skip), for Call's end_call.
+	crossOps []*TraceHistoryOperation
 
 	plan      []*ExecGeneratedStep
 	planDepth int
@@ -415,6 +427,67 @@ func addedAfter(messages AnnotatedMessages, before int) AnnotatedMessages {
 	return messages[before:]
 }
 
+// cross folds the annotations a step marked for crossing into e.Crossed.
+// part is this turn's part of the step's list, read newest message first
+// so that, as with GetAnnotation, the newest pin of a name is the step's
+// value: it crosses if it is marked, and an older pin under the same name
+// is not read, marked or not. Within a message names are taken in sorted
+// order so the fold is deterministic. The map key is the annotation's name
+// on the reply, as it is for GetAnnotation and the templates. A reserved
+// name is skipped and reported; everything else is placed. Only marked
+// annotations count: on a message the step was handed, resumed or
+// borrowed, every inherited Cross was cleared by forStep, so a mark there
+// is the step's.
+func (e *TodoListExecutive) cross(part AnnotatedMessages) {
+	seen := make(map[string]bool)
+	for i := len(part) - 1; i >= 0; i-- {
+		m := part[i]
+		for _, name := range slices.Sorted(maps.Keys(m.Annotations)) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			a := m.Annotations[name]
+			if !a.Cross.Enabled {
+				continue
+			}
+			a.Name = name
+			if reservedAnnotation(name) {
+				e.crossOps = append(e.crossOps, &TraceHistoryOperation{Type: "annotation", Action: "skip", Annotation: &a})
+				continue
+			}
+			e.place(a)
+		}
+	}
+}
+
+// place puts one crossed annotation into e.Crossed, in plan order across
+// steps: a name not yet placed is appended as is; a name already placed
+// keeps its first value, Explanation and Cross unless that value's Merge
+// says otherwise, and the later annotation's Merge is never consulted.
+// Each outcome is recorded on e.crossOps: cross for a placement, merge
+// (with the value after the merge) or keep (with the value dropped) for a
+// collision.
+func (e *TodoListExecutive) place(next Annotation) {
+	for i := range e.Crossed {
+		placed := &e.Crossed[i]
+		if placed.Name != next.Name {
+			continue
+		}
+		if placed.Cross.Merge == nil {
+			e.crossOps = append(e.crossOps, &TraceHistoryOperation{Type: "annotation", Action: "keep", Annotation: &next})
+			return
+		}
+		placed.Data = placed.Cross.Merge(placed.Data, next.Data)
+		after := *placed
+		e.crossOps = append(e.crossOps, &TraceHistoryOperation{Type: "annotation", Action: "merge", Annotation: &after})
+		return
+	}
+	e.Crossed = append(e.Crossed, next)
+	first := next
+	e.crossOps = append(e.crossOps, &TraceHistoryOperation{Type: "annotation", Action: "cross", Annotation: &first})
+}
+
 func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGeneratedStep) []PlanResult {
 	var wg sync.WaitGroup
 
@@ -450,13 +523,18 @@ func (e *TodoListExecutive) executePlan(ctx context.Context, plan []*ExecGenerat
 	wg.Wait()
 
 	// Every goroutine has returned, so each step's list is final. The
-	// records are built in plan order, not in the completion order the
-	// results channel holds, and whatever signal the step ended with.
+	// records are built and the crossed annotations folded in plan order,
+	// not in the completion order the results channel holds, and whatever
+	// signal the step ended with. The record reads what the behavior
+	// appended; crossing reads one notch earlier, from the messages resume
+	// appended (turnStart), since that is where a state pins on a resumed
+	// step.
 	for i, step := range plan {
 		if step.ReplanTombstone {
 			continue
 		}
 		e.ToolCalls = append(e.ToolCalls, recordToolCalls(step.Behavior.Name(), addedAfter(step.Messages, before[i]))...)
+		e.cross(addedAfter(step.Messages, step.turnStart))
 	}
 
 	results <- nil
@@ -552,22 +630,30 @@ Rephrase the following statements or questions as a single question or statement
 `
 
 // Execute runs the plan and decides the turn's reply. It writes e.Output,
-// e.ToolCalls and e.plan (and, on a re-plan, rewrites the last message of
-// messages with the direction and the summaries) and returns a Signal: nil
-// when Output holds the reply, the *ErrorSignal of the out-of-bounds handler
-// or of the summarizer when the call that was to write the reply failed. On
-// failure Output is empty and e.plan holds the kept steps as a successful
-// turn would have stored them; ToolCalls holds whatever ran, on a failed
-// turn as on a successful one.
+// e.ToolCalls, e.Crossed and e.plan (and, on a re-plan, rewrites the last
+// message of messages with the direction and the summaries) and returns a
+// Signal: nil when Output holds the reply, the *ErrorSignal of the
+// out-of-bounds handler or of the summarizer when the call that was to
+// write the reply failed. On failure Output is empty and e.plan holds the
+// kept steps as a successful turn would have stored them; ToolCalls and
+// Crossed hold whatever ran and crossed, on a failed turn as on a
+// successful one. Crossed reads this turn's part of each step, which
+// resume marks; a caller that runs Execute on a kept plan without going
+// through Call or RunLoop (the Lua binding does) leaves that mark where the
+// last resume put it.
 func (e *TodoListExecutive) Execute(ctx context.Context, messages AnnotatedMessages) Signal {
-	// One turn, one record: cleared here and nowhere else, so a re-plan's
-	// first round keeps its calls.
+	// One turn, one record and one fold: cleared here and nowhere else, so
+	// a re-plan's first round keeps its calls and its crossed annotations,
+	// which then own their slots when the second round's are folded in.
 	e.ToolCalls = nil
+	e.Crossed = nil
+	e.crossOps = nil
 	return e.execute(ctx, messages)
 }
 
 // execute is Execute's body. The re-plan recursion calls it, not Execute, so
-// the first round's tool-call records survive into the second round's.
+// the first round's tool-call records and crossed annotations survive into
+// the second round's.
 func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessages) Signal {
 	if len(e.plan) == 0 {
 		// A turn that ends here ends like any other: the re-plan depth
@@ -586,8 +672,12 @@ func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessa
 			},
 		})
 		// The handler was given one message; whatever it added past it is
-		// read for tool calls like a step's part, whatever its signal.
+		// read for tool calls like a step's part, whatever its signal. Its
+		// crossed annotations are read off the whole list: the one message
+		// was built above with an empty map, so anything marked on it is
+		// the handler's own, and it is where an annotation-mode state pins.
 		e.ToolCalls = append(e.ToolCalls, recordToolCalls(e.OutOfBoundsHandler.Name(), addedAfter(m, 1))...)
+		e.cross(m)
 		if err, ok := sig.(*ErrorSignal); ok {
 			e.Output = ""
 			return err
@@ -808,15 +898,19 @@ func (e *TodoListExecutive) Call(ctx context.Context, messages AnnotatedMessages
 
 	now := time.Now()
 	telem.End = &now
+	// The operations report what the fold resolved, whatever the turn's
+	// signal: a failed turn appended no reply, but the fold ran before the
+	// reply was decided and Crossed holds its result.
 	trace.Send(&TraceMessage{
-		Type:      TraceMessageTypeCallEnd,
-		ID:        e.Hash(),
-		ClientID:  e.ClientID,
-		Name:      e.Name(),
-		Error:     err,
-		Message:   "leaving planner state",
-		Telemetry: &telem,
-		Signal:    TraceForSignal(sig),
+		Type:       TraceMessageTypeCallEnd,
+		ID:         e.Hash(),
+		ClientID:   e.ClientID,
+		Name:       e.Name(),
+		Error:      err,
+		Message:    "leaving planner state",
+		Telemetry:  &telem,
+		Operations: e.crossOps,
+		Signal:     TraceForSignal(sig),
 	})
 
 	return messages, sig
