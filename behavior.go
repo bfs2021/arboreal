@@ -44,9 +44,12 @@ type BehaviorTree struct {
 	// Intake selects, from the transcript, the messages appended to this
 	// tree's step when the executive resumes it. Nil selects the last user
 	// message since the agent last spoke, or nothing (see LastUserMessage);
-	// TrailingUserMessages selects every user message since then. It is
-	// code, not state: snapshots do not carry it, and Copy hands the same
-	// func to the copy, so it must not capture the tree it is set on.
+	// TrailingUserMessages selects every user message since then. The
+	// executive appends the step's own copies, each with its own annotation
+	// map and every inherited Cross cleared, so a selector may return the
+	// transcript's shallow copies as they are. It is code, not state:
+	// snapshots do not carry it, and Copy hands the same func to the copy,
+	// so it must not capture the tree it is set on.
 	Intake func(transcript AnnotatedMessages) AnnotatedMessages `json:"-"`
 
 	// Opening selects what this tree's step starts with when the executive
@@ -59,11 +62,11 @@ type BehaviorTree struct {
 	// appends. An annotation-mode state reads only the list's last user-role
 	// message, so a tree whose extractor needs the words opens with them
 	// alone. An empty result opens with the direction alone. The executive
-	// gives every message of the result its own annotation map, so an opener
-	// may return the selectors' shallow copies as they are; it must not modify
-	// the transcript. It is code, not state: snapshots do not carry it, and
-	// Copy hands the same func to the copy, so it must not capture the tree
-	// it is set on.
+	// gives every message of the result its own annotation map, with every
+	// inherited Cross cleared, so an opener may return the selectors' shallow
+	// copies as they are; it must not modify the transcript. It is code, not
+	// state: snapshots do not carry it, and Copy hands the same func to the
+	// copy, so it must not capture the tree it is set on.
 	Opening func(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages `json:"-"`
 
 	stateLookupMap map[any]int

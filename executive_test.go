@@ -1718,3 +1718,630 @@ func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestResumeClonesTheAnnotationMap(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "Want it held?"))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// The application pins on its own transcript message, marked; the
+	// paused step is resumed with that message and writes nothing itself.
+	in := AppendToMessages(one, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Yes please"})
+	in.LastMessage().Annotations["k"] = Annotation{Name: "k", Data: "from the app", Cross: Crossing{Enabled: true}}
+
+	if _, sig := exec.Call(context.Background(), in); sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+
+	// The step's copy of "Yes please" is in its kept list. It must carry
+	// the inherited annotation, without its Cross, in a map of its own.
+	var got *AnnotatedMessage
+	for i := range exec.plan[0].Messages {
+		if m := &exec.plan[0].Messages[i]; m.Content == "Yes please" {
+			got = m
+		}
+	}
+	if got == nil {
+		t.Fatal("the resumed step's list holds no copy of the message resume appended")
+	}
+	k, ok := got.Annotations["k"]
+	if !ok || k.Data != "from the app" {
+		t.Fatalf("the copy's k = %+v (present %v), want the transcript's value", k, ok)
+	}
+	if k.Cross.Enabled || k.Cross.Merge != nil {
+		t.Fatal("the copy's inherited annotation still carries Cross; the clone must clear it")
+	}
+	got.Annotations["probe"] = Annotation{Name: "probe"}
+	if _, ok := in.LastMessage().Annotations["probe"]; ok {
+		t.Fatal("the step's annotation map is the transcript's: resume did not clone it")
+	}
+	if !in.LastMessage().Annotations["k"].Cross.Enabled {
+		t.Fatal("the transcript's own annotation lost its Cross; the clone must not write back")
+	}
+}
+
+func TestOpenStepClearsTheCrossOnBorrowedMessages(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return append(TrailingUserMessages(tr), d)
+	}
+	// The transcript's message carries a marked pin, as one the application
+	// pinned by hand, or a reply the executive appended, would if an Opening
+	// borrowed it. Borrowed as is, it would cross again on the step's first
+	// turn, whose part is the whole list.
+	messages := transcript("user", "the words")
+	messages[0].Annotations["outcome"] = Annotation{Name: "outcome", Data: "resolved", Cross: Crossing{Enabled: true, Merge: KeepLast}}
+
+	step := openStep(tree, "the direction", messages)
+
+	got, ok := step.Messages[0].Annotations["outcome"]
+	if !ok || got.Data != "resolved" {
+		t.Fatalf("the step's copy of the words carries outcome = %+v (present %v), want the transcript's value", got, ok)
+	}
+	if got.Cross.Enabled || got.Cross.Merge != nil {
+		t.Fatal("the step's copy still carries Cross; a borrowed pin would cross again on the step's first turn")
+	}
+	if a := messages[0].Annotations["outcome"]; !a.Cross.Enabled || a.Cross.Merge == nil {
+		t.Fatal("the transcript's own pin lost its Cross; the clone must not write back")
+	}
+}
+
+// lastUserIndex is the index of the last user-role message in history, or
+// of the last message when there is none: where an annotation-mode
+// LLMCompletionState pins (state.go), and on a resumed step the message the
+// executive appended this turn.
+func lastUserIndex(history AnnotatedMessages) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == llm.ChatMessageRoleUser {
+			return i
+		}
+	}
+	return len(history) - 1
+}
+
+// pinningTreeFrom is a tree whose first state writes pin(history) onto the
+// list's last user message, under the annotation's Name, then replies with
+// text and finishes, or pauses when wait is true. It stands in for any
+// state that marks a pin: the executive reads the mark, not the state.
+func pinningTreeFrom(id string, pin func(AnnotatedMessages) Annotation, text string, wait bool) *BehaviorTree {
+	tree := CreateBehaviorTreeWithId(id, "pins an annotation and replies with "+text, "example", id)
+	first := &BehaviorState{
+		HashId:    id + "-pin",
+		StateName: "pin",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			a := pin(history)
+			history[lastUserIndex(history)].Annotations[a.Name] = a
+			return history, nil
+		},
+	}
+	reply := CannedResponseState(text)
+	reply.HashId = id + "-reply"
+	reply.StateName = "reply"
+	tree.AddTransition(first, reply)
+	if wait {
+		pause := PauseState("wait for the user")
+		pause.HashId = id + "-wait"
+		pause.StateName = "wait"
+		tree.AddTransition(reply, &pause)
+	}
+	return &tree
+}
+
+// pinningTree is pinningTreeFrom with one fixed annotation.
+func pinningTree(id string, a Annotation, text string, wait bool) *BehaviorTree {
+	return pinningTreeFrom(id, func(AnnotatedMessages) Annotation { return a }, text, wait)
+}
+
+// echoPinTree pins, marked to cross, under name plus ":" plus the last
+// message's content, with "heard " plus that content as Data, so each
+// turn's pin has a name and a value of its own: a test can tell whose turn
+// a crossed value came from, and an earlier turn's pin crossed again shows
+// up as a second entry instead of hiding behind the newer one.
+func echoPinTree(id, name, text string, wait bool) *BehaviorTree {
+	return pinningTreeFrom(id, func(history AnnotatedMessages) Annotation {
+		said := history.LastMessage().Content
+		return Annotation{Name: name + ":" + said, Data: "heard " + said, Cross: Crossing{Enabled: true}}
+	}, text, wait)
+}
+
+func TestExecuteCrossesAMarkedAnnotation(t *testing.T) {
+	noModel(t)
+	pin := Annotation{Name: "conflict_outcome", Data: "resolved", Explanation: "the user accepted", Cross: Crossing{Enabled: true}}
+	exec := replyExecutive(pinningTree("tree-a", pin, "Glad that is settled.", false))
+	seedPlan(t, exec, "tree-a")
+
+	// Execute alone does not resume, so the step's list is its one
+	// direction, the pin lands there, and turnStart is 0: the part of a
+	// step planned this turn is its whole list.
+	sig := exec.Execute(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Glad that is settled." {
+		t.Fatalf("Output = %q, want the step's reply", exec.Output)
+	}
+	if n := len(exec.Crossed); n != 1 {
+		t.Fatalf("Crossed holds %d annotations, want 1: %+v", n, exec.Crossed)
+	}
+	got := exec.Crossed[0]
+	if got.Name != pin.Name || got.Data != pin.Data || got.Explanation != pin.Explanation || !got.Cross.Enabled {
+		t.Fatalf("Crossed[0] = %+v, want the pin as written", got)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps, want 0: the step finished and was dropped", n)
+	}
+}
+
+func TestTwoStepsMergeThroughTheFirstsMerge(t *testing.T) {
+	noModel(t)
+	sum := func(mine, theirs any) any { return mine.(int) + theirs.(int) }
+	a := delayed(pinningTree("tree-a", Annotation{Name: "count", Data: 1, Explanation: "A's count", Cross: Crossing{Enabled: true, Merge: sum}}, "A done", false), 20*time.Millisecond)
+	b := pinningTree("tree-b", Annotation{Name: "count", Data: 2, Explanation: "B's count", Cross: Crossing{Enabled: true, Merge: KeepLast}}, "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+	in := userTurn()
+
+	// Two steps ran, so the summarizer is called and, with no token, fails:
+	// this is the failed-turn test too. tree-a sleeps, so it completes
+	// second; the fold is in plan order regardless, tree-a owns the slot
+	// and its Merge decides, and tree-b's KeepLast is never consulted.
+	var out AnnotatedMessages
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		out, sig = exec.Call(ctx, in)
+	})
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("Call returned %d messages, want the %d it was given: a failed turn appends no reply", len(out), len(in))
+	}
+	if n := len(exec.Crossed); n != 1 {
+		t.Fatalf("Crossed holds %d annotations, want 1: %+v", n, exec.Crossed)
+	}
+	got := exec.Crossed[0]
+	if got.Name != "count" || got.Data != 3 {
+		t.Fatalf("Crossed[0] = %+v, want count = 3, the sum in plan order", got)
+	}
+	if got.Explanation != "A's count" {
+		t.Fatalf("Explanation = %q, want the first step's", got.Explanation)
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	want := []struct {
+		action string
+		data   any
+	}{{"cross", 1}, {"merge", 3}}
+	if len(end.Operations) != len(want) {
+		t.Fatalf("the executive's end_call carries %d operations, want %d: %+v", len(end.Operations), len(want), end.Operations)
+	}
+	for i, op := range end.Operations {
+		if op.Type != "annotation" || op.Action != want[i].action || op.Annotation == nil || op.Annotation.Name != "count" || op.Annotation.Data != want[i].data {
+			t.Fatalf("operation %d = %+v (annotation %+v), want %s of count = %v", i, op, op.Annotation, want[i].action, want[i].data)
+		}
+	}
+}
+
+func TestTwoStepsWithoutMergeKeepTheFirst(t *testing.T) {
+	noModel(t)
+	a := delayed(pinningTree("tree-a", Annotation{Name: "verdict", Data: "A's", Cross: Crossing{Enabled: true}}, "A done", false), 20*time.Millisecond)
+	b := pinningTree("tree-b", Annotation{Name: "verdict", Data: "B's", Cross: Crossing{Enabled: true}}, "B done", false)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		_, sig = exec.Call(ctx, userTurn())
+	})
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Data != "A's" {
+		t.Fatalf("Crossed = %+v, want one verdict holding A's: without a Merge the first in plan order stands", exec.Crossed)
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	want := []struct {
+		action string
+		data   any
+	}{{"cross", "A's"}, {"keep", "B's"}}
+	if len(end.Operations) != len(want) {
+		t.Fatalf("the executive's end_call carries %d operations, want %d: %+v", len(end.Operations), len(want), end.Operations)
+	}
+	for i, op := range end.Operations {
+		if op.Type != "annotation" || op.Action != want[i].action || op.Annotation == nil || op.Annotation.Name != "verdict" || op.Annotation.Data != want[i].data {
+			t.Fatalf("operation %d = %+v (annotation %+v), want %s of verdict = %v", i, op, op.Annotation, want[i].action, want[i].data)
+		}
+	}
+}
+
+func TestAReservedNameIsNeverCrossed(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pinningTree("tree-a", Annotation{Name: "raw_history", Data: "not the transcript", Cross: Crossing{Enabled: true}}, "A done", false))
+	seedPlan(t, exec, "tree-a")
+
+	var out AnnotatedMessages
+	var sig Signal
+	traced := drainTrace(func(ctx context.Context) {
+		out, sig = exec.Call(ctx, userTurn())
+	})
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil: a reserved name is skipped, not an error", sig)
+	}
+	if n := len(exec.Crossed); n != 0 {
+		t.Fatalf("Crossed = %+v, want nothing: raw_history never crosses", exec.Crossed)
+	}
+	if _, ok := out.LastMessage().Annotations["raw_history"]; ok {
+		t.Fatal("the reply carries raw_history")
+	}
+	end := endCall(traced, "reply exec")
+	if end == nil {
+		t.Fatal("no end_call named reply exec on the trace")
+	}
+	if len(end.Operations) != 1 {
+		t.Fatalf("the executive's end_call carries %d operations, want 1: %+v", len(end.Operations), end.Operations)
+	}
+	op := end.Operations[0]
+	if op.Type != "annotation" || op.Action != "skip" || op.Annotation == nil || op.Annotation.Name != "raw_history" {
+		t.Fatalf("operation = %+v (annotation %+v), want skip of raw_history", op, op.Annotation)
+	}
+}
+
+func TestTheHandlersAnnotationsCross(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(cannedTree("tree-a", "A"))
+	exec.OutOfBoundsHandler = &BehaviorState{
+		HashId:    "state-pinning-handler",
+		StateName: "pinning handler",
+		Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+			// On the one message the handler was given, where an
+			// annotation-mode state would write.
+			history[0].Annotations["feedback_filed"] = Annotation{Name: "feedback_filed", Data: "issue 42", Cross: Crossing{Enabled: true}}
+			return append(history, AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{
+				Role: llm.ChatMessageRoleAssistant, Content: "Filed as issue 42.",
+			}}), nil
+		},
+	}
+	in := userTurn()
+	// No plan seeded: Execute goes straight to the handler.
+
+	sig := exec.Execute(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Execute returned %v, want nil", sig)
+	}
+	if exec.Output != "Filed as issue 42." {
+		t.Fatalf("Output = %q, want the handler's reply", exec.Output)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Name != "feedback_filed" || exec.Crossed[0].Data != "issue 42" {
+		t.Fatalf("Crossed = %+v, want one feedback_filed holding issue 42", exec.Crossed)
+	}
+	// The handler was handed a copy with a fresh map; the caller's message
+	// is untouched, and the pin reaches the transcript only through Crossed.
+	if _, ok := in[0].Annotations["feedback_filed"]; ok {
+		t.Fatal("the handler's pin landed on the caller's message")
+	}
+}
+
+func TestTheNewestPinOfANameDecidesWhetherItCrosses(t *testing.T) {
+	noModel(t)
+	// A state pins "verdict" twice in one turn: marked on the user's message,
+	// then again on a message it appends. The newest pin is the step's value,
+	// as GetAnnotation reads it, so it alone decides whether, and what,
+	// crosses; the older marked pin is never read.
+	for _, c := range []struct {
+		name  string
+		newer Crossing
+		want  []any
+	}{
+		{"marked again, the newer value crosses", Crossing{Enabled: true}, []any{"new"}},
+		{"unmarked again, nothing crosses", Crossing{}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := CreateBehaviorTreeWithId("tree-a", "pins verdict twice", "example", "tree-a")
+			pin := &BehaviorState{
+				HashId:    "tree-a-pin",
+				StateName: "pin",
+				Lambda: func(ctx context.Context, history AnnotatedMessages) (AnnotatedMessages, Signal) {
+					history[lastUserIndex(history)].Annotations["verdict"] = Annotation{Name: "verdict", Data: "old", Cross: Crossing{Enabled: true}}
+					history = AppendToMessages(history, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleAssistant, Content: "thinking"})
+					history.LastMessage().Annotations["verdict"] = Annotation{Name: "verdict", Data: "new", Cross: c.newer}
+					return history, nil
+				},
+			}
+			reply := CannedResponseState("Done.")
+			reply.HashId = "tree-a-reply"
+			reply.StateName = "reply"
+			tree.AddTransition(pin, reply)
+			exec := replyExecutive(&tree)
+			seedPlan(t, exec, "tree-a")
+
+			if sig := exec.Execute(context.Background(), userTurn()); sig != nil {
+				t.Fatalf("Execute returned %v, want nil", sig)
+			}
+			var got []any
+			for _, a := range exec.Crossed {
+				got = append(got, a.Data)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("Crossed data = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// crossedOn is the annotation named name on m, failing the test if m
+// carries none.
+func crossedOn(t *testing.T, m *AnnotatedMessage, name string) Annotation {
+	t.Helper()
+	a, ok := m.Annotations[name]
+	if !ok {
+		t.Fatalf("the message %q carries no %q annotation; it has %v", m.Content, name, m.Annotations)
+	}
+	return a
+}
+
+func TestCallCrossesAnEnabledAnnotationOntoTheReply(t *testing.T) {
+	noModel(t)
+	pin := Annotation{Name: "conflict_outcome", Data: "resolved", Explanation: "the user accepted", Cross: Crossing{Enabled: true}}
+	exec := replyExecutive(pinningTree("tree-a", pin, "Glad that is settled.", false))
+	seedPlan(t, exec, "tree-a")
+	in := userTurn()
+
+	out, sig := exec.Call(context.Background(), in)
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	if len(out) != len(in)+1 || out.LastMessage().Content != "Glad that is settled." {
+		t.Fatalf("Call returned %d messages ending %q, want the input plus the reply", len(out), out.LastMessage().Content)
+	}
+	got := crossedOn(t, out.LastMessage(), "conflict_outcome")
+	if got.Name != pin.Name || got.Data != pin.Data || got.Explanation != pin.Explanation {
+		t.Fatalf("the reply's conflict_outcome = %+v, want the pin as written", got)
+	}
+	if !got.Cross.Enabled {
+		t.Fatal("the reply's copy lost its Cross; it is kept as the mark that the pin came from a step")
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Data != "resolved" {
+		t.Fatalf("Crossed = %+v, want the one pin", exec.Crossed)
+	}
+	if n := len(exec.plan); n != 0 {
+		t.Fatalf("plan holds %d steps, want 0", n)
+	}
+	// The state wrote on the step's copy of the user's message; the
+	// transcript's element is untouched, and the pin reached the transcript
+	// through the reply alone.
+	for i, m := range out[:len(in)] {
+		if _, ok := m.Annotations["conflict_outcome"]; ok {
+			t.Fatalf("input message %d gained conflict_outcome; only the reply carries it", i)
+		}
+	}
+}
+
+func TestCallLeavesAnUnmarkedAnnotationOnTheStep(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pinningTree("tree-a", Annotation{Name: "conflict_brief", Data: "scratch for the reply state"}, "Done.", false))
+	seedPlan(t, exec, "tree-a")
+
+	out, sig := exec.Call(context.Background(), userTurn())
+
+	if sig != nil {
+		t.Fatalf("Call returned %v, want nil", sig)
+	}
+	for i, m := range out {
+		if _, ok := m.Annotations["conflict_brief"]; ok {
+			t.Fatalf("message %d carries conflict_brief; an unmarked pin stays on the step", i)
+		}
+	}
+	if n := len(exec.Crossed); n != 0 {
+		t.Fatalf("Crossed = %+v, want nothing", exec.Crossed)
+	}
+}
+
+func TestRunLoopAttachesCrossedAnnotations(t *testing.T) {
+	noModel(t)
+	pin := Annotation{Name: "conflict_outcome", Data: "resolved", Cross: Crossing{Enabled: true}}
+	exec := replyExecutive(pinningTree("tree-a", pin, "Glad that is settled.", false))
+	seedPlan(t, exec, "tree-a")
+
+	ch := &oneShotChannel{}
+	err := exec.RunLoop(context.Background(), ch)
+
+	// RunLoop returns on the channel's EOF, not on a failed turn.
+	if err == nil || err.Error() != "eof" {
+		t.Fatalf("RunLoop returned %v, want the channel's eof", err)
+	}
+	if ch.sends != 1 {
+		t.Fatalf("RunLoop sent %d replies, want 1", ch.sends)
+	}
+	last := exec.History.LastMessage()
+	if last == nil || last.Role != llm.ChatMessageRoleAssistant || last.Content != "Glad that is settled." {
+		t.Fatalf("History ends on %+v, want the reply", last)
+	}
+	if got := crossedOn(t, last, "conflict_outcome"); got.Data != "resolved" {
+		t.Fatalf("History's reply carries conflict_outcome = %+v, want resolved", got)
+	}
+	if _, ok := exec.History[0].Annotations["conflict_outcome"]; ok {
+		t.Fatal("the user's message in History carries the pin; the step must write on its own copy")
+	}
+}
+
+func TestParallelStepsAnnotateWithoutSharing(t *testing.T) {
+	noModel(t)
+	a := pinningTree("tree-a", Annotation{Name: "a_said", Data: "A", Cross: Crossing{Enabled: true}}, "A asks", true)
+	b := pinningTree("tree-b", Annotation{Name: "b_said", Data: "B", Cross: Crossing{Enabled: true}}, "B asks", true)
+	exec := replyExecutive(a, b)
+	seedPlan(t, exec, "tree-a", "tree-b")
+	in := userTurn()
+
+	// Both steps are resumed with the same transcript message and both
+	// write on it, in parallel. Before the clone they wrote one map from
+	// two goroutines, which the race detector reports and the runtime may
+	// abort on; now each writes its own. Two steps paused, so the
+	// summarizer runs and fails: the pins are on Crossed, not on a reply.
+	_, sig := exec.Call(modelCtx(), in)
+
+	if _, ok := sig.(*ErrorSignal); !ok {
+		t.Fatalf("Call returned %T (%v), want the summarizer's *ErrorSignal", sig, sig)
+	}
+	got := map[string]any{}
+	for _, c := range exec.Crossed {
+		got[c.Name] = c.Data
+	}
+	if len(got) != 2 || got["a_said"] != "A" || got["b_said"] != "B" {
+		t.Fatalf("Crossed = %+v, want a_said = A and b_said = B", exec.Crossed)
+	}
+	if n := len(in[0].Annotations); n != 0 {
+		t.Fatalf("the transcript's message gained %v; the steps must write on their own copies", in[0].Annotations)
+	}
+	for _, step := range exec.plan {
+		copyOfHello := step.Messages[step.turnStart]
+		if copyOfHello.Content != "Hello" {
+			t.Fatalf("step %s's turnStart points at %q, want its copy of Hello", step.Behavior.Name(), copyOfHello.Content)
+		}
+		if n := len(copyOfHello.Annotations); n != 1 {
+			t.Fatalf("step %s's copy of Hello carries %v, want only its own pin", step.Behavior.Name(), copyOfHello.Annotations)
+		}
+	}
+}
+
+func TestAPausedStepCrossesThisTurnOnly(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(echoPinTree("tree-a", "heard", "Want it held?", true))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+	if got := crossedOn(t, one.LastMessage(), "heard:Hello"); got.Data != "heard Hello" {
+		t.Fatalf("turn one's reply carries heard:Hello = %v, want heard Hello", got.Data)
+	}
+	firstReply := len(one) - 1
+
+	// The step is paused and kept; its list holds turn one's pin on its
+	// copy of Hello. On resume the tree runs from its first state again
+	// and pins on its copy of Yes please: two marked pins on the list, and
+	// only the second is in this turn's part.
+	two, sig := exec.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Name != "heard:Yes please" {
+		t.Fatalf("turn two crossed %+v, want only heard:Yes please: the step's earlier turn must not be re-crossed", exec.Crossed)
+	}
+	if n := len(two); n != len(one)+2 {
+		t.Fatalf("turn two returned %d messages, want %d: the new user message and the reply", n, len(one)+2)
+	}
+	if got := crossedOn(t, two.LastMessage(), "heard:Yes please"); got.Data != "heard Yes please" {
+		t.Fatalf("turn two's reply carries heard:Yes please = %v, want heard Yes please", got.Data)
+	}
+	if _, ok := two.LastMessage().Annotations["heard:Hello"]; ok {
+		t.Fatal("turn two's reply carries turn one's pin: the step's earlier turn was crossed again")
+	}
+	if got := crossedOn(t, &two[firstReply], "heard:Hello"); got.Data != "heard Hello" {
+		t.Fatalf("turn one's reply carries heard:Hello = %v after turn two, want its own heard Hello", got.Data)
+	}
+}
+
+func TestAnInheritedEnabledPinIsNotRecrossed(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "Want it held?"))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// The application pins on its own transcript message, marked, as a
+	// crossed value copied there by hand would be; the step inherits it on
+	// resume and writes nothing itself.
+	in := AppendToMessages(one, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Yes please"})
+	in.LastMessage().Annotations["conflict_outcome"] = Annotation{Name: "conflict_outcome", Data: "resolved", Cross: Crossing{Enabled: true}}
+
+	two, sig := exec.Call(context.Background(), in)
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if _, ok := two.LastMessage().Annotations["conflict_outcome"]; ok {
+		t.Fatal("the reply carries the application's own pin; an inherited mark must not cross again")
+	}
+	if n := len(exec.Crossed); n != 0 {
+		t.Fatalf("Crossed = %+v, want nothing", exec.Crossed)
+	}
+	if a := two[len(two)-2].Annotations["conflict_outcome"]; a.Data != "resolved" || !a.Cross.Enabled {
+		t.Fatalf("the transcript's own pin is now %+v, want it as the application wrote it", a)
+	}
+}
+
+func TestCrossingAfterRestoreHoldsOnlyTheNewTurn(t *testing.T) {
+	noModel(t)
+	build := func() *TodoListExecutive {
+		return replyExecutive(echoPinTree("tree-a", "heard", "Want it held?", true))
+	}
+	first := build()
+	seedPlan(t, first, "tree-a")
+
+	one, sig := first.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// Between the turns: snapshot the paused executive, round-trip it
+	// through JSON as a store would, and restore into a fresh one built the
+	// same way. The restored step's list holds turn one's pin, marked,
+	// with "cross":{"enabled":true} in the JSON; turnStart is 0 after
+	// Restore, and resume stamps it before Execute reads it.
+	snap, err := TakeSnapshot(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"cross":{"enabled":true}`) {
+		t.Fatalf("the snapshot lost turn one's mark, so the restored turn could not re-cross it even if the boundary were wrong: %s", b)
+	}
+	var stored Snapshot
+	if err := json.Unmarshal(b, &stored); err != nil {
+		t.Fatal(err)
+	}
+	second := build()
+	if err := stored.Restore(second); err != nil {
+		t.Fatal(err)
+	}
+
+	two, sig := second.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if n := len(second.Crossed); n != 1 || second.Crossed[0].Name != "heard:Yes please" {
+		t.Fatalf("turn two after a restore crossed %+v, want only heard:Yes please: the restored step's earlier turn must not be re-crossed", second.Crossed)
+	}
+	if got := crossedOn(t, two.LastMessage(), "heard:Yes please"); got.Data != "heard Yes please" {
+		t.Fatalf("the reply carries heard:Yes please = %v, want heard Yes please", got.Data)
+	}
+	if _, ok := two.LastMessage().Annotations["heard:Hello"]; ok {
+		t.Fatal("the reply carries turn one's pin: the restored step's earlier turn was crossed again")
+	}
+}

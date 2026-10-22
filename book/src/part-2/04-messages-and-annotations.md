@@ -13,6 +13,12 @@ type Annotation struct {
     Name        string
     Data        any
     Explanation string
+    Cross       Crossing // whether, and how, this annotation crosses to the executive's reply
+}
+
+type Crossing struct {
+    Enabled bool                       // off by default: the annotation stays on the step
+    Merge   func(mine, theirs any) any // how two steps' values for one name combine; nil keeps the first
 }
 
 type AnnotatedMessage struct {
@@ -23,7 +29,7 @@ type AnnotatedMessage struct {
 type AnnotatedMessages []AnnotatedMessage
 ```
 
-These three types in `annotation.go` are the whole data model. `AnnotatedMessage` embeds the provider-neutral `llm.ChatCompletionMessage` from `llm/chat.go`, which carries `Role`, `Content`, `ToolCalls`, `Name` and a few provider details, so `m.Role` and `m.Content` work directly on an annotated message. `Annotations` maps a name to an `Annotation`: the `Name` again, a `Data` value of any type, and a free-text `Explanation` that the framework fills in for the `$` meta-annotations and otherwise leaves to you. `AnnotatedMessages` is the list every `Call` receives and returns. Its `ChatCompletionMessages()` method strips the annotations and returns the plain `[]llm.ChatCompletionMessage`; that is what gets sent to a model, so a model never sees an annotation. `LastMessage()` returns a pointer to the final element, or `nil` for an empty list.
+These types in `annotation.go` are the whole data model. `AnnotatedMessage` embeds the provider-neutral `llm.ChatCompletionMessage` from `llm/chat.go`, which carries `Role`, `Content`, `ToolCalls`, `Name` and a few provider details, so `m.Role` and `m.Content` work directly on an annotated message. `Annotations` maps a name to an `Annotation`: the `Name` again, a `Data` value of any type, a free-text `Explanation` that the framework fills in for the `$` meta-annotations and otherwise leaves to you, and `Cross`, which matters only under an executive and only to a state that sets it: it marks the annotation as one the executive copies onto the reply it appends when the step's turn ends, so a fact a step learned outlives the step (Chapter 8 has the rules; the zero value crosses nothing and is omitted from JSON). `AnnotatedMessages` is the list every `Call` receives and returns. Its `ChatCompletionMessages()` method strips the annotations and returns the plain `[]llm.ChatCompletionMessage`; that is what gets sent to a model, so a model never sees an annotation. `LastMessage()` returns a pointer to the final element, or `nil` for an empty list.
 
 ## Run it
 
@@ -90,6 +96,8 @@ There are two ways to get an annotation into a history, and which one applies de
 **Appending a message.** `AppendToMessages(history, msg)` wraps an `llm.ChatCompletionMessage` in an `AnnotatedMessage`, appends it, and returns the new list. The wrapper's `Annotations` map is empty but not `nil`, so the message is ready to be written to. `history` may be `nil`; the first call makes the list. The probe builds its history this way, and so does `RunLoop` for every incoming user message.
 
 **Writing into an existing message.** To annotate a message already in the list, assign into its map: `history.LastMessage().Annotations["name"] = Annotation{Data: "Joe"}`. The map key is what `GetAnnotation` and the templates look up, so the struct's own `Name` field can stay empty; `Explanation` is free text for your own use. This is how the framework writes: an annotation-mode `LLMCompletionState` stores the parsed reply this way on the last user message. It is also how the lookup states in `examples/crm` work: after a database hit they replace the model's partial `name` with the full name from the row and add a `membank` beside it.
+
+**Marking a pin to cross.** Under an executive a step's messages are the step's own, and a finished step is dropped with them (Chapter 8). An annotation a state writes with `Cross: Crossing{Enabled: true}` is the exception: when the turn ends, the executive copies it onto the reply it appends to the transcript, under the same name, and when two steps crossed the same name in one turn the `Merge` on the pin of the first in plan order decides how the values combine: `KeepFirst`, `KeepLast`, or your own function, with nil keeping the first. `Merge` is a function and is not stored; on the transcript the value is a result, and the `cross.enabled` key that survives says it came from a step. The annotation-mode `LLMCompletionState` has no switch for this, and a `cross` key in the model's JSON is dropped before the pin is stored: a lambda state that writes the value itself sets the field, and one placed after an extractor can re-pin the extracted value, marked.
 
 The second idiom assumes the map exists, and it does not always. A message built with a struct literal has a `nil` map, and the reply that `LLMCompletionState` appends in its normal mode is built exactly that way, as `AnnotatedMessage{ChatCompletionMessage: res.Message}`. Writing into a `nil` map panics. So on any message you did not create with `AppendToMessages`, check the map and `make` it first, which is what `evalIntoAnnotation` and `AddTraceInformation` both do. All three cases in one place:
 
@@ -186,7 +194,7 @@ The reply is expected to be a JSON object shaped like `Annotation`, `{"data": â€
 
 ## Coming from LangGraph
 
-A LangGraph `State` is a schema: `TypedDict` fields, each optionally with a reducer such as `add_messages` that says how a node's patch is merged into the existing value. The runtime validates keys, applies reducers, and merges the writes of parallel branches before the next superstep. Arboreal has none of that. An annotation is a name and an `any`, attached to whichever message produced it and found by searching backwards from the newest. The upside is that provenance is free: a fact extracted from the user's third message sits on that message, and a later fact with the same name sits on a later one, so the list is a history of the value as well as its current reading. The downside is that nothing checks names or types: a typo in `ExtraContext` injects nothing and reports nothing, and a state that asserts `Data.(string)` gets whatever the writer put there. The mapping breaks at reducers: LangGraph needs them because parallel branches write into one shared state, while Arboreal's concurrent steps each own a separate message list, so there is nothing to merge and no place to declare how.
+A LangGraph `State` is a schema: `TypedDict` fields, each optionally with a reducer such as `add_messages` that says how a node's patch is merged into the existing value. The runtime validates keys, applies reducers, and merges the writes of parallel branches before the next superstep. Arboreal has none of that. An annotation is a name and an `any`, attached to whichever message produced it and found by searching backwards from the newest. The upside is that provenance is free: a fact extracted from the user's third message sits on that message, and a later fact with the same name sits on a later one, so the list is a history of the value as well as its current reading. The downside is that nothing checks names or types: a typo in `ExtraContext` injects nothing and reports nothing, and a state that asserts `Data.(string)` gets whatever the writer put there. The mapping breaks at reducers: LangGraph needs them because parallel branches write into one shared state, while Arboreal's concurrent steps each own a separate message list, so within a turn there is nothing to merge. The one place values from parallel steps meet is the reply, and only for annotations marked to cross: there the `Merge` on the first step's pin, in plan order, plays a reducer's part for that one name (Chapter 8).
 
 ## Sharp edges
 
@@ -195,7 +203,7 @@ A LangGraph `State` is a schema: `TypedDict` fields, each optionally with a redu
 ```
 
 ```admonish warning title="Sharp edge"
-The framework uses the annotation map for its own bookkeeping. `__trace_annotations` is a breadcrumb written by `AddTraceInformation` and scrubbed by `BehaviorState.Call`; `plan`, `raw_history`, `$context` and `tool_calls` are written by the executive, the last onto the reply it appends, as the record of the turn's executed tool calls (Chapter 12). Iterate over annotations by the names you own, never over the whole map, and never write these names yourself.
+The framework uses the annotation map for its own bookkeeping. `__trace_annotations` is a breadcrumb written by `AddTraceInformation` and scrubbed by `BehaviorState.Call`; `plan`, `raw_history`, `$context` and `tool_calls` are written by the executive, the last onto the reply it appends, as the record of the turn's executed tool calls (Chapter 12). None of these five names ever crosses from a step to the reply, whatever its `Cross`: the executive skips it and says so on the trace (Chapter 11). Iterate over annotations by the names you own, never over the whole map, and never write these names yourself.
 ```
 
 ```admonish warning title="Sharp edge"
@@ -217,4 +225,5 @@ Steps 4 and 7 are `ChatCompletionMessages()` at work. `chatState` passes the ste
 - `GetAnnotation` searches newest-first; `$last_message`, `$date`, `$date_llm` are built in.
 - Templates: `{{ name }}`, conditional `{{ Label: name? }}`, escape `??`.
 - `ExtraContext` injects annotations into a system prompt; annotation mode extracts them from a reply.
+- `Cross: Crossing{Enabled: true}` marks a pin the executive copies onto its reply; the zero value stays on the step.
 ```

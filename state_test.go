@@ -409,3 +409,25 @@ func TestLLMCompletionStateDoesNotPinModelAcrossCalls(t *testing.T) {
 		t.Fatalf("second call: error = %q, want it to contain %q (state was pinned to the first call's model)", sig.ErrorMessage, anthropicErr)
 	}
 }
+
+func TestAnnotationFromReplyNeverMarksAPinToCross(t *testing.T) {
+	// A model's JSON decodes into the whole Annotation, "cross" included.
+	// Annotation mode has no switch for crossing, so whatever the reply
+	// says, the pin is stored unmarked; a prompt-injected "cross" cannot
+	// put the value on the transcript.
+	got := annotationFromReply("verdict", `{"name":"verdict","data":"resolved","cross":{"enabled":true}}`)
+	if got.Data != "resolved" || got.Name != "verdict" {
+		t.Fatalf("decoded %+v, want the reply's name and data", got)
+	}
+	if got.Cross.Enabled || got.Cross.Merge != nil {
+		t.Fatalf("decoded %+v, want Cross zero: the model does not mark pins", got)
+	}
+
+	// A reply that is not JSON, or JSON without data, is the Data itself.
+	for _, content := range []string{"just words", `{"name":"verdict"}`} {
+		got := annotationFromReply("verdict", content)
+		if got.Name != "verdict" || got.Data != content || got.Cross.Enabled {
+			t.Fatalf("decoded %q as %+v, want it as the Data of an unmarked verdict", content, got)
+		}
+	}
+}

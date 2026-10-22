@@ -12,10 +12,60 @@ import (
 	"unicode/utf8"
 )
 
+// Crossing says whether an annotation a step writes is copied onto the
+// reply the executive appends, and how two steps' values for the same name
+// combine when both cross in one turn.
+type Crossing struct {
+	// Enabled makes the annotation cross. Off by default: an annotation a
+	// step writes stays on the step's messages unless it says otherwise.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Merge is called when another step crossed the same name in the same
+	// turn, in plan order, as (mine, theirs) on the annotation already
+	// placed, and returns the Data to keep. Nil keeps mine: the first step
+	// to cross a name wins. Only consulted when Enabled. It must not mutate
+	// mine or theirs in place, since both may still be a step's own pin or
+	// the transcript's; it returns a new value. Not stored: the merge
+	// happens within the turn, before any snapshot or transcript is
+	// written, and on the transcript the value is a result.
+	Merge func(mine, theirs any) any `json:"-"`
+}
+
+// IsZero reports whether the annotation does not cross, so that omitzero
+// leaves Cross out of JSON whenever Enabled is false: a Merge on an
+// annotation that does not cross is ignored, and is not stored either.
+func (c Crossing) IsZero() bool { return !c.Enabled }
+
+// KeepFirst is a Merge strategy: the value already placed stands.
+func KeepFirst(mine, theirs any) any { return mine }
+
+// KeepLast is a Merge strategy: the later step's value replaces the placed
+// one.
+func KeepLast(mine, theirs any) any { return theirs }
+
 type Annotation struct {
 	Name        string `json:"name"`
 	Data        any    `json:"data"`
 	Explanation string `json:"explanation"`
+	// Cross says whether, and how, this annotation crosses from a step's
+	// messages to the reply the executive appends. The zero value does not
+	// cross, and omitzero (with Crossing.IsZero) keeps it out of JSON, so
+	// an annotation that does not cross is stored as it always was.
+	Cross Crossing `json:"cross,omitzero"`
+}
+
+// reservedAnnotation reports whether name is one the executive writes for
+// itself: tool_calls (the record on the reply), raw_history and $context
+// (on a planned step's direction), plan (the planner's answer) and
+// __trace_annotations (the tracer's breadcrumb). A step's annotation under
+// one of these names never crosses, whatever its Cross; raw_history is the
+// one that matters, since its Data is the whole transcript.
+func reservedAnnotation(name string) bool {
+	switch name {
+	case AnnotationToolCalls, "raw_history", "$context", "plan", "__trace_annotations":
+		return true
+	}
+	return false
 }
 
 type AnnotatedMessage struct {
@@ -34,6 +84,24 @@ func cloneAnnotations(m AnnotatedMessage) AnnotatedMessage {
 		annotations[name] = annotation
 	}
 	m.Annotations = annotations
+	return m
+}
+
+// forStep is the copy of a transcript message a step receives, when the
+// executive opens the step and when it resumes it: the same embedded
+// message with its own annotation map (cloneAnnotations), holding each
+// annotation with Cross cleared. Steps handed one transcript message then
+// never share a map, nothing a step inherits can cross, and nothing a step
+// writes reaches the transcript except by crossing. The copy is one level
+// deep: an Annotation.Data that is itself a map or slice is still the
+// transcript's, as are the embedded message's Meta, MultiContent and
+// ToolCalls.
+func (m AnnotatedMessage) forStep() AnnotatedMessage {
+	m = cloneAnnotations(m)
+	for name, a := range m.Annotations {
+		a.Cross = Crossing{}
+		m.Annotations[name] = a
+	}
 	return m
 }
 

@@ -56,7 +56,7 @@ Patterns are indexed by intent — what you are trying to build. Each is a named
 | Concurrent plan steps corrupt a nested subtree's walk, or a nested executive keeps stale state and never pauses the outer tree | `Copy()` is one level deep — a nested `*BehaviorTree` (including one wrapping a `TodoListExecutive`) is shared by pointer, with its own `State`/`Traversed`/`plan`; the executive's own `Copy()`, reachable from the Lua binding, also nil-derefs an unset `OutOfBoundsHandler` | Keep concurrently-run trees flat or build each step a fresh tree; set `OutOfBoundsHandler` anyway, and never nest an executive that pauses | [Ch 7](../part-2/07-behavior-trees.md) |
 | A newly built tree panics the first time it's called, not when it's constructed | `Call` on a tree with no states indexes `Nodes[0]` unconditionally in `Graph.Initial()` | Wire at least one state into every tree before running it | [Ch 7](../part-2/07-behavior-trees.md) |
 | One of two identically-named behaviors always runs, or re-planning silently stops working | Behaviors are matched by `Name()` case-sensitively, but `re-plan` is matched case-insensitively, so a behavior named `Re-plan` wins the lookup before the tombstone check | Give every behavior a distinct name, and never name one `Re-plan` (in any case) | [Ch 8](../part-2/08-the-executive.md) |
-| The reply you read is stale, or empty | `Output` is a side channel that `Execute` mutates rather than returns, and it is left empty when the reply call failed; `ToolCalls` beside it is the same shape, and still holds what ran before the failure | Read `Output` and `ToolCalls` immediately after `Execute` and check `Execute`'s signal (or use `Call`, which appends the reply with its record for you and returns the failure) | [Ch 8](../part-2/08-the-executive.md) |
+| The reply you read is stale, or empty | `Output` is a side channel that `Execute` mutates rather than returns, and it is left empty when the reply call failed; `ToolCalls` and `Crossed` beside it are the same shape, and still hold what ran and crossed before the failure | Read `Output`, `ToolCalls` and `Crossed` immediately after `Execute` and check `Execute`'s signal (or use `Call`, which appends the reply with its record and crossed annotations for you and returns the failure) | [Ch 8](../part-2/08-the-executive.md) |
 
 ### Tools & MCP
 
@@ -87,6 +87,8 @@ Patterns are indexed by intent — what you are trying to build. Each is a named
 | An extraction block silently renders empty, or truncated at a colon | The block's text is tokenized as Go source; an apostrophe starts a char literal and `//` starts a comment | Keep apostrophes and URLs outside `{{ }}` extraction blocks | [Ch 4](../part-2/04-messages-and-annotations.md) |
 | The planner/summarizer prompt renders a stray `�`, or `Plan` panics on a later turn quoting a user message | `AnnotationTemplate.Parse` mishandles both ends: an empty `Preamble` decodes to `utf8.RuneError`; an unclosed `{{` inside quoted `History` text fails to parse | Always set a one-line `Preamble`; escape `{{`/`}}` in user text before it reaches `History` | [Ch 8](../part-2/08-the-executive.md) |
 | Writing an annotation onto a hand-built message panics with an assignment to a nil map | Only `AppendToMessages` initializes `Annotations`; a struct literal (or a message unmarshaled from `"Annotations": null`) carries a nil map | Build histories with `AppendToMessages`, or initialize `Annotations` before writing | [Ch 4](../part-2/04-messages-and-annotations.md) |
+| A pin a state wrote never reaches the transcript | Only an annotation with `Cross.Enabled` crosses, only from this turn's part of the step's list, and never under a reserved name; an unmarked pin, a marked pin shadowed by a newer unmarked one of the same name, an earlier turn's pin, a mark the application put on its own transcript message, and a `raw_history` lookalike all stay where they are | Set `Cross: Crossing{Enabled: true}` on the value you write, on a message of this turn, under a name you own, as the newest pin of that name; read it back off the reply `Call` returned | [Ch 8](../part-2/08-the-executive.md) |
+| Two steps crossed the same name and one value vanished | The first step in plan order owns the slot; without a `Merge` on its pin the later value is dropped, with a `keep` on the executive's `end_call` | Put a `Merge` on the pin of the step that plans first (`KeepLast`, or your own function), or use distinct names | [Ch 8](../part-2/08-the-executive.md) |
 
 ## Recipes
 
@@ -168,7 +170,7 @@ exec := arboreal.CreateTodoListExecutiveWithId(name, description, "exec-bookshel
 
 ### Caller-Owned Transcript
 
-**When:** anything driven by `Call` rather than `RunLoop`. **Shape:** append the user's message to a list you own, hand it to `Call`, keep what comes back, persist it yourself — and assign it onto `History` so that `TakeSnapshot` records the truth. The snapshot is disposable pending-state beside it, not the record of what was said.
+**When:** anything driven by `Call` rather than `RunLoop`. **Shape:** append the user's message to a list you own, hand it to `Call`, keep what comes back — the reply on its end carries the steps' tool calls and whatever they marked to cross — persist it yourself, and assign it onto `History` so that `TakeSnapshot` records the truth. The snapshot is disposable pending-state beside it, not the record of what was said.
 
 ```go
 transcript = arboreal.AppendToMessages(transcript, userMessage)
@@ -192,7 +194,7 @@ use := arboreal.LLMCompletionState(arboreal.LLMCompletionOptions{
 tree.AddTransition(&extract, &use)
 ```
 
-Both states must be in one tree, because the annotation is pinned onto the last user-role message of the list the tree was called with, which on a fresh step is the planner's direction, unless the tree's `Opening` ends the list with the user's words instead. Which makes the handoff per-turn: when the step completes it is dropped from the plan, and its message list, annotations and all, goes with it. Facts that must outlive the task belong on the transcript you own, not on a step. `examples/bookshelf`'s `extract-genre` → `recommend` pair is this pattern end to end; [Chapter 4](../part-2/04-messages-and-annotations.md) has both halves in detail.
+Both states must be in one tree, because the annotation is pinned onto the last user-role message of the list the tree was called with, which on a fresh step is the planner's direction, unless the tree's `Opening` ends the list with the user's words instead. Which makes the handoff per-turn: when the step completes it is dropped from the plan, and its message list, annotations and all, goes with it. Facts that must outlive the task have two ways out: write them on the transcript you own, not on a step; or have the state mark its pin with `Cross: Crossing{Enabled: true}`, and the executive carries it onto the reply it appends when the turn ends, merging it in plan order if another step crossed the same name (Chapter 8). The annotation-mode state in this pattern cannot mark its pin, since `LLMCompletionOptions` has no such switch; a lambda state after it that re-pins the extracted value, marked, can. `examples/bookshelf`'s `extract-genre` → `recommend` pair is this pattern end to end; [Chapter 4](../part-2/04-messages-and-annotations.md) has both halves in detail.
 
 ### Thin Model States
 
@@ -235,7 +237,7 @@ availability.Opening = func(d arboreal.AnnotatedMessage, t arboreal.AnnotatedMes
 }
 ```
 
-Every message the tree borrows from the transcript gets its own annotation map on the step, so a state that pins on it writes the step's copy, not the transcript's. What the opener returns is what the step gets, direction first or the whole transcript included; only an empty return is corrected, to the direction alone. ([Chapter 8](../part-2/08-the-executive.md) for `openStep` and the ordering rule, [Chapter 14](14-putting-it-together.md) for the bookshelf's lookup, which is this fragment in place.)
+Every message the tree borrows from the transcript gets its own annotation map on the step, with any inherited `Cross` cleared, so a state that pins on it writes the step's copy, not the transcript's, and a crossed pin the borrowed message already carries does not cross again. What the opener returns is what the step gets, direction first or the whole transcript included; only an empty return is corrected, to the direction alone. ([Chapter 8](../part-2/08-the-executive.md) for `openStep` and the ordering rule, [Chapter 14](14-putting-it-together.md) for the bookshelf's lookup, which is this fragment in place.)
 
 ### Faithful Directions via Preamble
 
