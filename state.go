@@ -338,14 +338,7 @@ func evalIntoAnnotation(ctx context.Context, history AnnotatedMessages, options 
 		}
 	}
 
-	var annotation Annotation
-	err = json.Unmarshal([]byte(res.Message.Content), &annotation)
-	if err != nil || annotation.Data == nil {
-		annotation = Annotation{
-			Name: options.Annotation,
-			Data: res.Message.Content,
-		}
-	}
+	annotation := annotationFromReply(options.Annotation, res.Message.Content)
 
 	if history[lastUserMessageIndex].Annotations == nil {
 		history[lastUserMessageIndex].Annotations = make(map[string]Annotation)
@@ -355,6 +348,24 @@ func evalIntoAnnotation(ctx context.Context, history AnnotatedMessages, options 
 	history.AddTraceInformation(options.Annotation)
 
 	return history, nil
+}
+
+// annotationFromReply decodes an annotation-mode reply: the model's JSON
+// when it parses and carries data, else the raw text as the Data of an
+// annotation named name. The model names the Data; it does not get to say
+// whether the pin crosses, since annotation mode has no switch for that
+// (see Annotation.Cross), so a reply carrying "cross" is stored unmarked.
+func annotationFromReply(name, content string) Annotation {
+	var annotation Annotation
+	err := json.Unmarshal([]byte(content), &annotation)
+	if err != nil || annotation.Data == nil {
+		annotation = Annotation{
+			Name: name,
+			Data: content,
+		}
+	}
+	annotation.Cross = Crossing{}
+	return annotation
 }
 
 // allowedToolCall reports whether the AllowTools loop may execute a call to
