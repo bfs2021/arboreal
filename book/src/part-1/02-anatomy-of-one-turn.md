@@ -127,10 +127,10 @@ It is a Go `text/template`; the `{{ … }}` slots are filled in from the executi
 
 In the quickstart there is one behavior to choose from, and the planner returned one step: a fresh copy of `chatBehavior` whose message list holds a single user-role message, the planner's direction. How the reply travels back inside `Plan`, and where your original words are stashed along the way, run on machinery Part II introduces — annotations in Chapter 4, the planner line by line in Chapter 8.
 
-This is also the answer to Chapter 1's teaser. The behavior never received `Hi, I'm Paul. What can you do?` as a message. It received whatever the planner wrote in the `direction` field; your words ride along only as hidden context pinned to that message, which nothing in the quickstart reads. Nothing in `executivePlannerPrompt` asks the planner to preserve the user's words, and nothing in `chatState`, which has empty options and therefore no system prompt, tells the model how to read a direction if it does. Whether your name survives depends on a paraphrase you did not write.
+This is also the answer to Chapter 1's teaser. The behavior never received `Hi, I'm Paul. What can you do?` as a message, because `chatBehavior` opens with the direction, the default for a tree that sets no `Opening` (Chapter 7 has the field, Chapter 8 what it does). It received whatever the planner wrote in the `direction` field; your words ride along only as hidden context pinned to that message, which nothing in the quickstart reads. Nothing in `executivePlannerPrompt` asks the planner to preserve the user's words, and nothing in `chatState`, which has empty options and therefore no system prompt, tells the model how to read a direction if it does. Whether your name survives depends on a paraphrase you did not write.
 
 ```admonish warning title="Sharp edge"
-The behavior does not see what the user typed. It sees the planner's *direction* — a paraphrase written by the planning LLM. With no instructions the paraphrase can drift ("my name is Paul" can become a greeting addressed to Paul). The workaround, from `examples/snapshot-simple`, is a `Preamble` that tells the planner how to write directions: `When writing the "direction" for a step, restate the user's message faithfully in the third person, quoting it`. Chapter 8 covers the `Preamble`.
+The behavior does not see what the user typed. It sees the planner's *direction* — a paraphrase written by the planning LLM. With no instructions the paraphrase can drift ("my name is Paul" can become a greeting addressed to Paul). The workaround, from `examples/snapshot-simple`, is a `Preamble` that tells the planner how to write directions: `When writing the "direction" for a step, restate the user's message faithfully in the third person, quoting it`. Chapter 8 covers the `Preamble`. A tree that needs the words as written can open with them instead: set `Opening` on the tree, and its step starts with the user's message, alone or followed by the direction (Chapter 8). The `Preamble` fix remains for a tree that wants the planner's gist but needs it kept faithful.
 ```
 
 ### Step 3 — Execute, fan out
@@ -267,7 +267,7 @@ func (e *TodoListExecutive) RunLoop(ctx context.Context, c Channel) error {
 `executePlan` calls `step.Behavior.Call` on the same tree copy as last turn. Its stack is empty, because the pause state had no children to push, so `BehaviorTree.Call` starts over: it pushes `Graph.Initial()`, resets `Traversed`, and runs `chatState` again. This time `chatState` sends the whole three-message list to the model, so the model sees a conversation with a prior exchange in it, and its reply is appended as the fourth message. `pauseState` runs, returns `CollectUserInputSignal`, the step is kept, it is the only step that ran, and `Output` is the new reply as written. The pattern repeats for as long as you keep typing. That is the whole chat loop: plan once, then resume the paused step forever, on a message list that grows by two messages every turn.
 
 ```admonish warning title="Sharp edge"
-There are two conversations. The executive's `History` is the transcript you would show a user: their messages and the executive's outputs. Each step's `Messages` is what the model actually sees: the planner's direction, the replies, and whatever the tree selected from the transcript on each resume — by default, that turn's last user message. They are related but not identical, and when something looks wrong in a reply, the step's messages are the ones to inspect. Besides the reply itself, one thing crosses back from the steps to the transcript: when a step called a tool, the reply the executive appends carries a `tool_calls` annotation recording which step called which tool, with what arguments, and what it answered (Chapter 12), so the transcript can say what a turn *did* even after the step and its messages are gone.
+There are two conversations. The executive's `History` is the transcript you would show a user: their messages and the executive's outputs. Each step's `Messages` is what the model actually sees: what its tree opened with, the planner's direction unless `Opening` says otherwise, the replies, and whatever the tree selected from the transcript on each resume — by default, that turn's last user message. They are related but not identical, and when something looks wrong in a reply, the step's messages are the ones to inspect. Besides the reply itself, one thing crosses back from the steps to the transcript: when a step called a tool, the reply the executive appends carries a `tool_calls` annotation recording which step called which tool, with what arguments, and what it answered (Chapter 12), so the transcript can say what a turn *did* even after the step and its messages are gone.
 ```
 
 ## Vocabulary
@@ -277,7 +277,7 @@ There are two conversations. The executive's `History` is the transcript you wou
 | **turn** | one pass through `RunLoop`: receive, (plan,) execute, send |
 | **plan** | the list of steps the planner produced; empty means "plan afresh next turn" |
 | **step** | a `Copy()` of one behavior plus its own message list |
-| **direction** | the planner's free-text instruction for a step; the first message the behavior sees |
+| **direction** | the planner's free-text instruction for a step; the first message the behavior sees, unless its tree's `Opening` puts the user's words before it |
 | **signal** | what a `Call` returns alongside the messages: `nil`, `Skip`, `Terminal`, `CollectUserInput`, or `Error` |
 | **history** | the executive's transcript; distinct from a step's messages |
 | **output** | the string the executive sends back for the turn |
@@ -293,7 +293,7 @@ The piece with no LangGraph analogue is step 2. Before any graph runs, an LLM re
 
 ```admonish example title="Recap"
 - A turn is: receive → (plan if none pending) → execute → send.
-- The planner produces steps: a behavior copy plus a message list that starts with the planner's **direction**, not the user's words.
+- The planner produces steps: a behavior copy plus a message list that starts with the planner's **direction**, not the user's words, unless the tree's `Opening` chooses otherwise.
 - Steps run concurrently; the tree inside a step walks its states with a stack and stops at a pause.
 - A paused step stays in the plan; the next turn resumes it rather than re-planning.
 - `History` and a step's `Messages` are different lists.

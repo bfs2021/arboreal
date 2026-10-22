@@ -212,9 +212,7 @@ func buildExecutive() *arboreal.TodoListExecutive {
 		Id:   "state-recommend",
 		Name: "recommend",
 		System: "You are the assistant of a small bookstore. Recommend exactly one book " +
-			"that fits the customer's request, with one sentence on why. " +
-			"Some user-role messages are third-person notes from a planning system " +
-			"describing what the customer said; treat them as the customer's own words.",
+			"that fits the customer's request, with one sentence on why.",
 		ExtraContext: []string{"genre"},
 	})
 	recommend.AddTransition(&extractGenre, &recommendState)
@@ -230,13 +228,22 @@ func buildExecutive() *arboreal.TodoListExecutive {
 		Name: "lookup",
 		System: "You are the assistant of a small bookstore. The customer wants to know " +
 			"whether a title or author is available. Use the catalog lookup tool to check, then " +
-			"answer from the tool's result only — never guess stock or prices. " +
-			"Some user-role messages are third-person notes from a planning system " +
-			"describing what the customer said; treat them as the customer's own words.",
+			"answer from the tool's result only — never guess stock or prices.",
 		AllowTools: true,
 		Tools:      []string{"bookshelf/lookup_book"},
 	})
 	availability.AddState(&lookupState)
+
+	// The lookup needs the title as the customer typed it, not the planner's
+	// paraphrase of it, so the step opens with the customer's message and
+	// then the planner's direction (Chapter 8); the lookup is not an
+	// annotation-mode state, so it reads the whole list. recommend_book
+	// stays on the default and opens with the direction alone: a
+	// recommendation wants the gist, and the planner's paraphrase is the
+	// gist.
+	availability.Opening = func(d arboreal.AnnotatedMessage, t arboreal.AnnotatedMessages) arboreal.AnnotatedMessages {
+		return append(arboreal.LastUserMessage(t), d)
+	}
 
 	hold := buildHoldTree()
 
@@ -247,14 +254,15 @@ func buildExecutive() *arboreal.TodoListExecutive {
 		&recommend, &availability, &hold,
 	)
 
-	// Faithful directions (Chapter 8): keep the customer's words intact in
-	// the planner's "direction", and route anything else out of bounds.
-	exec.Preamble = "You are the assistant of a small bookstore. When writing the " +
-		"\"direction\" for a step, restate the customer's message faithfully in the " +
-		"third person, quoting it, e.g.: The customer said: \"Do you have The " +
-		"Dispossessed in stock?\". Never rephrase the customer's words as if they " +
-		"were addressed to the customer. If the message fits none of the behaviors, " +
-		"return an empty JSON array: []. Never include a Re-plan step in the plan."
+	// The Preamble (Chapter 8) does three jobs here: its first sentence gives
+	// the executive an identity; it authorizes an empty plan, the only
+	// deliberate route to the OutOfBoundsHandler; and it forbids the Re-plan
+	// step, which a snapshot cannot carry (Chapter 14). It does not ask the
+	// planner to quote the customer: the one tree that needs the customer's
+	// words opens with them through its Opening.
+	exec.Preamble = "You are the assistant of a small bookstore. If the message fits none " +
+		"of the behaviors, return an empty JSON array: []. Never include a Re-plan " +
+		"step in the plan."
 
 	outOfBounds := arboreal.CannedResponseState(
 		"I can recommend a book, check whether we have one in stock, or put one on hold.")

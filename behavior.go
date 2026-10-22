@@ -13,10 +13,12 @@ type Behavior interface {
 	Copy() Behavior
 }
 
-// A TranscriptSelector has a say over what it takes from the transcript at
-// the start of a turn. The executive calls Select on every pending step
-// when it resumes, and appends the result to the step's own messages.
+// A TranscriptSelector has a say over what it takes from the transcript:
+// Open when the executive plans its step, Select when the executive
+// resumes it. Open's result is the step's opening messages; Select's
+// result is appended to the step's own messages.
 type TranscriptSelector interface {
+	Open(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages
 	Select(transcript AnnotatedMessages) AnnotatedMessages
 }
 
@@ -46,6 +48,23 @@ type BehaviorTree struct {
 	// code, not state: snapshots do not carry it, and Copy hands the same
 	// func to the copy, so it must not capture the tree it is set on.
 	Intake func(transcript AnnotatedMessages) AnnotatedMessages `json:"-"`
+
+	// Opening selects what this tree's step starts with when the executive
+	// plans it. It is given the planner's direction as a user-role message
+	// and the transcript at planning time, and returns the step's opening
+	// list. Nil opens with the direction alone. A tree that needs the user's
+	// words returns a selection from the transcript, alone or with the
+	// direction appended after it: the direction is the planner's note about
+	// the request and goes last, as the newest message, the way resume
+	// appends. An annotation-mode state reads only the list's last user-role
+	// message, so a tree whose extractor needs the words opens with them
+	// alone. An empty result opens with the direction alone. The executive
+	// gives every message of the result its own annotation map, so an opener
+	// may return the selectors' shallow copies as they are; it must not modify
+	// the transcript. It is code, not state: snapshots do not carry it, and
+	// Copy hands the same func to the copy, so it must not capture the tree
+	// it is set on.
+	Opening func(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages `json:"-"`
 
 	stateLookupMap map[any]int
 	hash           string
@@ -91,6 +110,14 @@ func (b *BehaviorTree) Select(transcript AnnotatedMessages) AnnotatedMessages {
 	return b.Intake(transcript)
 }
 
+// Open is the tree's Opening, or the direction alone when none is set.
+func (b *BehaviorTree) Open(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages {
+	if b.Opening == nil {
+		return AnnotatedMessages{direction}
+	}
+	return b.Opening(direction, transcript)
+}
+
 func (b *BehaviorTree) Copy() Behavior {
 	var t BehaviorTree
 
@@ -98,6 +125,7 @@ func (b *BehaviorTree) Copy() Behavior {
 	t.BehaviorDescription = b.BehaviorDescription
 	t.ClientID = b.ClientID
 	t.Intake = b.Intake
+	t.Opening = b.Opening
 	t.Example = b.Example
 	t.Graph = b.Graph
 	t.State = Stack[Behavior]{}

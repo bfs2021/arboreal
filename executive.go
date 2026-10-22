@@ -32,6 +32,49 @@ func copyStep(s Step) Step {
 	return s.Copy().(Step)
 }
 
+// openStep builds the planned step for b: a copy of the behavior, opened
+// with what it selects from the direction and the transcript. The result's
+// messages own their annotation maps, and the first carries raw_history and
+// $context.
+func openStep(b Step, direction string, transcript AnnotatedMessages) *ExecGeneratedStep {
+	behavior := copyStep(b)
+
+	directionMessage := AnnotatedMessage{
+		ChatCompletionMessage: llm.ChatCompletionMessage{
+			Role:    llm.ChatMessageRoleUser,
+			Content: direction,
+		},
+		Annotations: make(map[string]Annotation),
+	}
+
+	opening := behavior.Open(directionMessage, transcript)
+	if len(opening) == 0 {
+		// A step never opens empty: states dereference the list's last
+		// message, and a nil there is a crash inside executePlan's goroutine.
+		opening = AnnotatedMessages{directionMessage}
+	}
+
+	// A new list of messages with their own maps, so that neither an opener
+	// that returns the selectors' shallow copies nor one that returns a
+	// sub-slice of the transcript leaves the step sharing a map with it.
+	messages := make(AnnotatedMessages, 0, len(opening))
+	for _, m := range opening {
+		messages = append(messages, cloneAnnotations(m))
+	}
+
+	messages[0].Annotations["raw_history"] = Annotation{
+		Data: transcript,
+	}
+	messages[0].Annotations["$context"] = Annotation{
+		Data: transcript.GetAnnotation("$context"),
+	}
+
+	return &ExecGeneratedStep{
+		Behavior: behavior,
+		Messages: messages,
+	}
+}
+
 type PlanResult struct {
 	Messages AnnotatedMessages  `json:"messages"`
 	Step     *ExecGeneratedStep `json:"step"`
@@ -289,27 +332,7 @@ func (e *TodoListExecutive) Plan(ctx context.Context, messages AnnotatedMessages
 
 			for _, step := range steps {
 				if b, ok := behaviorLookup[step.Name]; ok {
-					annotations := make(map[string]Annotation)
-
-					annotations["raw_history"] = Annotation{
-						Data: messages,
-					}
-					annotations["$context"] = Annotation{
-						Data: messages.GetAnnotation("$context"),
-					}
-
-					e.plan = append(e.plan, &ExecGeneratedStep{
-						Behavior: copyStep(b),
-						Messages: AnnotatedMessages{
-							{
-								ChatCompletionMessage: llm.ChatCompletionMessage{
-									Role:    llm.ChatMessageRoleUser,
-									Content: step.Direction,
-								},
-								Annotations: annotations,
-							},
-						},
-					})
+					e.plan = append(e.plan, openStep(b, step.Direction, messages))
 				} else {
 					if strings.ToLower(step.Name) == "re-plan" {
 						e.plan = append(e.plan, &ExecGeneratedStep{

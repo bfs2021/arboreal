@@ -28,6 +28,9 @@ func (b *ctxCapturingBehavior) Copy() Behavior      { return b }
 func (b *ctxCapturingBehavior) Select(transcript AnnotatedMessages) AnnotatedMessages {
 	return LastUserMessage(transcript)
 }
+func (b *ctxCapturingBehavior) Open(direction AnnotatedMessage, transcript AnnotatedMessages) AnnotatedMessages {
+	return AnnotatedMessages{direction}
+}
 
 func (b *ctxCapturingBehavior) Call(ctx context.Context, messages AnnotatedMessages) (AnnotatedMessages, Signal) {
 	b.called = true
@@ -1553,5 +1556,165 @@ func TestRunLoopResumesWithWhatTheStepSelects(t *testing.T) {
 	want := []string{"direction for tree-a", "first", "Hello", "the question"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RunLoop resumed the step with %v, want %v", got, want)
+	}
+}
+
+// The tests below drive openStep, the one place Plan builds a behavior's
+// step, without the planner: Plan runs its model through LLMCompletionState,
+// which cannot be faked, so the opening logic is tested on its own.
+
+func TestOpenStepDefaultsToTheDirection(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	messages := transcript("user", "first", "user", "second")
+	messages[0].Annotations["$context"] = Annotation{Name: "$context", Data: "the context"}
+
+	step := openStep(tree, "the direction", messages)
+
+	if step.ReplanTombstone {
+		t.Fatal("a planned behavior is not a tombstone")
+	}
+	if step.Behavior.(*BehaviorTree) == tree {
+		t.Fatal("the step runs on the tree itself, not on a copy")
+	}
+	if got := step.Behavior.Hash(); got != "tree-a" {
+		t.Fatalf("the step's behavior is %q, want the copy of tree-a", got)
+	}
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"the direction"}) {
+		t.Fatalf("the step opened with %v, want the direction alone", got)
+	}
+	first := step.Messages[0]
+	if first.Role != llm.ChatMessageRoleUser {
+		t.Fatalf("the direction has role %q, want user", first.Role)
+	}
+	if got := first.Annotations["raw_history"].Data; !reflect.DeepEqual(got, messages) {
+		t.Fatalf("raw_history holds %v, want the transcript at planning time", got)
+	}
+	if got := first.Annotations["$context"].Data; !reflect.DeepEqual(got, messages.GetAnnotation("$context")) {
+		t.Fatalf("$context holds %v, want what the transcript's GetAnnotation returned", got)
+	}
+	if n := len(first.Annotations); n != 2 {
+		t.Fatalf("the direction carries %d annotations, want the two pins only", n)
+	}
+}
+
+func TestOpenStepHandsTheOpenerTheDirectionAndTheTranscript(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	var gotDirection AnnotatedMessage
+	var gotTranscript AnnotatedMessages
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		gotDirection, gotTranscript = d, tr
+		return AnnotatedMessages{d}
+	}
+	messages := transcript("assistant", "hi", "user", "the words")
+
+	openStep(tree, "the direction", messages)
+
+	if gotDirection.Role != llm.ChatMessageRoleUser || gotDirection.Content != "the direction" {
+		t.Fatalf("the opener was handed %+v, want a user-role message holding the direction", gotDirection.ChatCompletionMessage)
+	}
+	if gotDirection.Annotations == nil || len(gotDirection.Annotations) != 0 {
+		t.Fatalf("the direction reached the opener with annotations %v, want an empty, non-nil map: the pins land after the opening", gotDirection.Annotations)
+	}
+	if !reflect.DeepEqual(gotTranscript, messages) {
+		t.Fatalf("the opener was handed %v, want the transcript", contents(gotTranscript))
+	}
+}
+
+func TestOpenStepGivesBorrowedMessagesTheirOwnMaps(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return append(TrailingUserMessages(tr), d)
+	}
+	messages := transcript("user", "first", "user", "second")
+	messages[0].Annotations["pref"] = Annotation{Name: "pref", Data: "paperback"}
+	messages[1].Annotations = nil
+
+	step := openStep(tree, "the direction", messages)
+
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"first", "second", "the direction"}) {
+		t.Fatalf("the step opened with %v, want the user's words then the direction", got)
+	}
+	first := step.Messages[0]
+	if _, ok := first.Annotations["raw_history"]; !ok {
+		t.Fatal("raw_history is not on the step's first message")
+	}
+	if _, ok := first.Annotations["$context"]; !ok {
+		t.Fatal("$context is not on the step's first message")
+	}
+	if first.Annotations["pref"].Data != "paperback" {
+		t.Fatal("the transcript message's own annotation did not come along")
+	}
+	for i, m := range step.Messages[1:] {
+		if _, ok := m.Annotations["raw_history"]; ok {
+			t.Fatalf("raw_history is pinned on message %d too; it belongs on the first only", i+1)
+		}
+		if _, ok := m.Annotations["$context"]; ok {
+			t.Fatalf("$context is pinned on message %d too; it belongs on the first only", i+1)
+		}
+	}
+
+	// A state that pins an annotation on any of the step's messages writes
+	// the step's own map; the transcript must not see it.
+	for i := range step.Messages {
+		step.Messages[i].Annotations["pinned"] = Annotation{Name: "pinned"}
+	}
+	if got := len(messages[0].Annotations); got != 1 {
+		t.Fatalf("the transcript's first message now holds %d annotations, want only pref: the step shares its map", got)
+	}
+	if messages[1].Annotations != nil {
+		t.Fatal("the transcript's second message gained a map: the step wrote through to the transcript")
+	}
+}
+
+func TestOpenStepLeavesTheTranscriptsOwnSliceAlone(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	// An opener may hand back a sub-slice of the transcript itself rather
+	// than a selector's new slice. The clones must still go into the step's
+	// own list; written back in place, they would swap the transcript
+	// message's map for the step's and pin raw_history onto the transcript.
+	tree.Opening = func(_ AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return tr[len(tr)-1:]
+	}
+	messages := transcript("user", "first", "user", "second")
+	messages[1].Annotations = nil
+
+	step := openStep(tree, "the direction", messages)
+
+	if got := contents(step.Messages); !reflect.DeepEqual(got, []string{"second"}) {
+		t.Fatalf("the step opened with %v, want the transcript's last message alone", got)
+	}
+	if step.Messages[0].Annotations == nil {
+		t.Fatal("the step's message has no map of its own")
+	}
+	// Do not print the transcript's map on failure: in the in-place case it
+	// holds raw_history, a slice that contains the message itself.
+	if messages[1].Annotations != nil {
+		t.Fatal("the transcript's message had its map replaced: the clones were written into the opener's slice")
+	}
+}
+
+func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		opening AnnotatedMessages
+	}{
+		{"nil", nil},
+		{"empty", AnnotatedMessages{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := cannedTree("tree-a", "A")
+			tree.Opening = func(AnnotatedMessage, AnnotatedMessages) AnnotatedMessages { return c.opening }
+			messages := transcript("user", "first", "user", "second")
+
+			got := openStep(tree, "the direction", messages)
+			want := openStep(cannedTree("tree-a", "A"), "the direction", messages)
+
+			if !reflect.DeepEqual(got.Messages, want.Messages) {
+				t.Fatalf("an empty opening produced %v, want the default's %v", contents(got.Messages), contents(want.Messages))
+			}
+			if n := len(got.Messages[0].Annotations); n != 2 {
+				t.Fatalf("the fallback direction carries %d annotations, want the two pins only", n)
+			}
+		})
 	}
 }
