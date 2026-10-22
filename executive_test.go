@@ -1718,3 +1718,75 @@ func TestOpenStepFallsBackToTheDirectionWhenTheOpeningIsEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestResumeClonesTheAnnotationMap(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "Want it held?"))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// The application pins on its own transcript message, marked; the
+	// paused step is resumed with that message and writes nothing itself.
+	in := AppendToMessages(one, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Yes please"})
+	in.LastMessage().Annotations["k"] = Annotation{Name: "k", Data: "from the app", Cross: Crossing{Enabled: true}}
+
+	if _, sig := exec.Call(context.Background(), in); sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+
+	// The step's copy of "Yes please" is in its kept list. It must carry
+	// the inherited annotation, without its Cross, in a map of its own.
+	var got *AnnotatedMessage
+	for i := range exec.plan[0].Messages {
+		if m := &exec.plan[0].Messages[i]; m.Content == "Yes please" {
+			got = m
+		}
+	}
+	if got == nil {
+		t.Fatal("the resumed step's list holds no copy of the message resume appended")
+	}
+	k, ok := got.Annotations["k"]
+	if !ok || k.Data != "from the app" {
+		t.Fatalf("the copy's k = %+v (present %v), want the transcript's value", k, ok)
+	}
+	if k.Cross.Enabled || k.Cross.Merge != nil {
+		t.Fatal("the copy's inherited annotation still carries Cross; the clone must clear it")
+	}
+	got.Annotations["probe"] = Annotation{Name: "probe"}
+	if _, ok := in.LastMessage().Annotations["probe"]; ok {
+		t.Fatal("the step's annotation map is the transcript's: resume did not clone it")
+	}
+	if !in.LastMessage().Annotations["k"].Cross.Enabled {
+		t.Fatal("the transcript's own annotation lost its Cross; the clone must not write back")
+	}
+}
+
+func TestOpenStepClearsTheCrossOnBorrowedMessages(t *testing.T) {
+	tree := cannedTree("tree-a", "A")
+	tree.Opening = func(d AnnotatedMessage, tr AnnotatedMessages) AnnotatedMessages {
+		return append(TrailingUserMessages(tr), d)
+	}
+	// The transcript's message carries a marked pin, as one the application
+	// pinned by hand, or a reply the executive appended, would if an Opening
+	// borrowed it. Borrowed as is, it would cross again on the step's first
+	// turn, whose part is the whole list.
+	messages := transcript("user", "the words")
+	messages[0].Annotations["outcome"] = Annotation{Name: "outcome", Data: "resolved", Cross: Crossing{Enabled: true, Merge: KeepLast}}
+
+	step := openStep(tree, "the direction", messages)
+
+	got, ok := step.Messages[0].Annotations["outcome"]
+	if !ok || got.Data != "resolved" {
+		t.Fatalf("the step's copy of the words carries outcome = %+v (present %v), want the transcript's value", got, ok)
+	}
+	if got.Cross.Enabled || got.Cross.Merge != nil {
+		t.Fatal("the step's copy still carries Cross; a borrowed pin would cross again on the step's first turn")
+	}
+	if a := messages[0].Annotations["outcome"]; !a.Cross.Enabled || a.Cross.Merge == nil {
+		t.Fatal("the transcript's own pin lost its Cross; the clone must not write back")
+	}
+}

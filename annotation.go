@@ -85,6 +85,24 @@ func cloneAnnotations(m AnnotatedMessage) AnnotatedMessage {
 	return m
 }
 
+// forStep is the copy of a transcript message a step receives, when the
+// executive opens the step and when it resumes it: the same embedded
+// message with its own annotation map (cloneAnnotations), holding each
+// annotation with Cross cleared. Steps handed one transcript message then
+// never share a map, nothing a step inherits can cross, and nothing a step
+// writes reaches the transcript except by crossing. The copy is one level
+// deep: an Annotation.Data that is itself a map or slice is still the
+// transcript's, as are the embedded message's Meta, MultiContent and
+// ToolCalls.
+func (m AnnotatedMessage) forStep() AnnotatedMessage {
+	m = cloneAnnotations(m)
+	for name, a := range m.Annotations {
+		a.Cross = Crossing{}
+		m.Annotations[name] = a
+	}
+	return m
+}
+
 type AnnotatedMessages []AnnotatedMessage
 
 func (a AnnotatedMessages) ChatCompletionMessages() (m []llm.ChatCompletionMessage) {

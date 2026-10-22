@@ -289,3 +289,38 @@ func TestReservedAnnotationNames(t *testing.T) {
 		}
 	}
 }
+
+func TestForStepClonesTheMapAndClearsCross(t *testing.T) {
+	m := AppendToMessages(nil, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Hello"}).LastMessage()
+	m.Annotations["k"] = Annotation{
+		Name: "k", Data: "v", Explanation: "why",
+		Cross: Crossing{Enabled: true, Merge: KeepLast},
+	}
+
+	got := m.forStep()
+
+	if got.Role != m.Role || got.Content != "Hello" {
+		t.Fatalf("forStep returned %+v, want the same embedded message", got.ChatCompletionMessage)
+	}
+	k, ok := got.Annotations["k"]
+	if !ok || k.Name != "k" || k.Data != "v" || k.Explanation != "why" {
+		t.Fatalf("the copy's k = %+v (present %v), want the original's name, data and explanation", k, ok)
+	}
+	if k.Cross.Enabled || k.Cross.Merge != nil {
+		t.Fatal("the copy's inherited annotation still carries Cross; forStep must clear it")
+	}
+	got.Annotations["probe"] = Annotation{Name: "probe"}
+	if _, ok := m.Annotations["probe"]; ok {
+		t.Fatal("writing into the copy's map wrote into the original's: forStep did not clone it")
+	}
+	if !m.Annotations["k"].Cross.Enabled {
+		t.Fatal("the original's annotation lost its Cross; forStep must not write back")
+	}
+
+	// A nil map becomes an empty map of the step's own, as cloneAnnotations
+	// gives it, so a state that pins on the copy need not allocate.
+	bare := AnnotatedMessage{ChatCompletionMessage: llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "x"}}
+	if own := bare.forStep().Annotations; own == nil || len(own) != 0 {
+		t.Fatalf("forStep gave a message that had no map %v, want an empty map of its own", own)
+	}
+}

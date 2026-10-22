@@ -71,22 +71,14 @@ func TestLastUserMessage(t *testing.T) {
 	}
 }
 
-func TestTrailingUserMessagesReturnsANewSliceOfShallowCopies(t *testing.T) {
+func TestTrailingUserMessagesReturnsANewSlice(t *testing.T) {
 	in := transcript("assistant", "hi", "user", "a", "user", "b")
-	in[1].Annotations = map[string]Annotation{"k": {Name: "k"}}
 
 	got := TrailingUserMessages(in)
 
 	got[0].Content = "changed"
 	if in[1].Content != "a" {
 		t.Fatal("TrailingUserMessages returned a slice that aliases the transcript")
-	}
-	// The copies are shallow: an annotation a state pins on the selected
-	// message lands on the transcript's message too, as the framework's
-	// annotation states expect.
-	got[0].Annotations["pinned"] = Annotation{Name: "pinned"}
-	if _, ok := in[1].Annotations["pinned"]; !ok {
-		t.Fatal("the selection's annotation map is not the transcript's: a pinned annotation would not reach the transcript")
 	}
 }
 

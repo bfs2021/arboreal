@@ -24,6 +24,13 @@ type ExecGeneratedStep struct {
 	Behavior        Step
 	Messages        AnnotatedMessages
 	ReplanTombstone bool
+
+	// turnStart is the index of the first message this turn gave the
+	// step: what resume appended, or 0 for a step planned this turn, so
+	// that crossing reads this turn's part only. Set by resume; zero from
+	// Plan and Restore. Not persisted: a restored executive has a plan, so
+	// Call and RunLoop resume before Execute and stamp it.
+	turnStart int
 }
 
 // copyStep copies a step's behavior. Copy returns a Behavior; a Step's copy
@@ -34,8 +41,8 @@ func copyStep(s Step) Step {
 
 // openStep builds the planned step for b: a copy of the behavior, opened
 // with what it selects from the direction and the transcript. The result's
-// messages own their annotation maps, and the first carries raw_history and
-// $context.
+// messages own their annotation maps, with no inherited Cross, and the first
+// carries raw_history and $context.
 func openStep(b Step, direction string, transcript AnnotatedMessages) *ExecGeneratedStep {
 	behavior := copyStep(b)
 
@@ -56,10 +63,12 @@ func openStep(b Step, direction string, transcript AnnotatedMessages) *ExecGener
 
 	// A new list of messages with their own maps, so that neither an opener
 	// that returns the selectors' shallow copies nor one that returns a
-	// sub-slice of the transcript leaves the step sharing a map with it.
+	// sub-slice of the transcript leaves the step sharing a map with it; and
+	// with every inherited Cross cleared, so a crossed pin a borrowed message
+	// already carries is not crossed again on the step's first turn.
 	messages := make(AnnotatedMessages, 0, len(opening))
 	for _, m := range opening {
-		messages = append(messages, cloneAnnotations(m))
+		messages = append(messages, m.forStep())
 	}
 
 	messages[0].Annotations["raw_history"] = Annotation{
@@ -733,14 +742,20 @@ func (e *TodoListExecutive) annotateReply(reply *AnnotatedMessage) {
 }
 
 // resume hands every pending step the part of the transcript its behavior
-// selects, appended to the step's own messages. A Re-plan tombstone has no
-// behavior and takes nothing.
+// selects, appended to the step's own messages as the step's own copies
+// (forStep), so steps resumed in one turn never share an annotation map and
+// nothing a step inherits can cross. turnStart marks where this turn's part
+// of the step begins, for crossing. A Re-plan tombstone has no behavior and
+// takes nothing.
 func (e *TodoListExecutive) resume(transcript AnnotatedMessages) {
 	for _, step := range e.plan {
 		if step.ReplanTombstone {
 			continue
 		}
-		step.Messages = append(step.Messages, step.Behavior.Select(transcript)...)
+		step.turnStart = len(step.Messages)
+		for _, m := range step.Behavior.Select(transcript) {
+			step.Messages = append(step.Messages, m.forStep())
+		}
 	}
 }
 
