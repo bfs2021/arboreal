@@ -232,7 +232,7 @@ A `PauseState` inside a nested tree does not resume that turn. When the inner tr
 ```
 
 ```admonish warning title="Sharp edge"
-`Copy()` is one level deep. It copies the `Graph` struct, but `Graph.Nodes` holds the same `Behavior` pointers, so a nested `*BehaviorTree` node is shared by pointer — with its own `State` stack and `Traversed` set. Two concurrent plan steps of a behavior that contains a subtree therefore collide inside that subtree. Until `Copy` recurses, keep trees that the executive may run concurrently flat, or give each step its own freshly built tree.
+`Copy()` is one level deep. It copies the `Graph` struct, but `Graph.Nodes` holds the same `Behavior` pointers, so a nested `*BehaviorTree` node is shared by pointer — with its own `State` stack and `Traversed` set. Two concurrent plan steps of a behavior that contains a subtree therefore collide inside that subtree. Until `Copy` recurses, keep trees that the executive may run concurrently flat, or give each step its own freshly built tree. One thing concurrent steps do *not* share is the annotation map of the message the executive hands each of them on resume: each step gets its own copy (Chapter 8), so two steps that both annotate it in the same turn no longer write one map from two goroutines, and a pin on it reaches the transcript only if the state marked it to cross.
 ```
 
 ```admonish warning title="Sharp edge"
