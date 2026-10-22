@@ -2218,3 +2218,130 @@ func TestParallelStepsAnnotateWithoutSharing(t *testing.T) {
 		}
 	}
 }
+
+func TestAPausedStepCrossesThisTurnOnly(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(echoPinTree("tree-a", "heard", "Want it held?", true))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+	if got := crossedOn(t, one.LastMessage(), "heard:Hello"); got.Data != "heard Hello" {
+		t.Fatalf("turn one's reply carries heard:Hello = %v, want heard Hello", got.Data)
+	}
+	firstReply := len(one) - 1
+
+	// The step is paused and kept; its list holds turn one's pin on its
+	// copy of Hello. On resume the tree runs from its first state again
+	// and pins on its copy of Yes please: two marked pins on the list, and
+	// only the second is in this turn's part.
+	two, sig := exec.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if n := len(exec.Crossed); n != 1 || exec.Crossed[0].Name != "heard:Yes please" {
+		t.Fatalf("turn two crossed %+v, want only heard:Yes please: the step's earlier turn must not be re-crossed", exec.Crossed)
+	}
+	if n := len(two); n != len(one)+2 {
+		t.Fatalf("turn two returned %d messages, want %d: the new user message and the reply", n, len(one)+2)
+	}
+	if got := crossedOn(t, two.LastMessage(), "heard:Yes please"); got.Data != "heard Yes please" {
+		t.Fatalf("turn two's reply carries heard:Yes please = %v, want heard Yes please", got.Data)
+	}
+	if _, ok := two.LastMessage().Annotations["heard:Hello"]; ok {
+		t.Fatal("turn two's reply carries turn one's pin: the step's earlier turn was crossed again")
+	}
+	if got := crossedOn(t, &two[firstReply], "heard:Hello"); got.Data != "heard Hello" {
+		t.Fatalf("turn one's reply carries heard:Hello = %v after turn two, want its own heard Hello", got.Data)
+	}
+}
+
+func TestAnInheritedEnabledPinIsNotRecrossed(t *testing.T) {
+	noModel(t)
+	exec := replyExecutive(pausingTree("tree-a", "Want it held?"))
+	seedPlan(t, exec, "tree-a")
+
+	one, sig := exec.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// The application pins on its own transcript message, marked, as a
+	// crossed value copied there by hand would be; the step inherits it on
+	// resume and writes nothing itself.
+	in := AppendToMessages(one, llm.ChatCompletionMessage{Role: llm.ChatMessageRoleUser, Content: "Yes please"})
+	in.LastMessage().Annotations["conflict_outcome"] = Annotation{Name: "conflict_outcome", Data: "resolved", Cross: Crossing{Enabled: true}}
+
+	two, sig := exec.Call(context.Background(), in)
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if _, ok := two.LastMessage().Annotations["conflict_outcome"]; ok {
+		t.Fatal("the reply carries the application's own pin; an inherited mark must not cross again")
+	}
+	if n := len(exec.Crossed); n != 0 {
+		t.Fatalf("Crossed = %+v, want nothing", exec.Crossed)
+	}
+	if a := two[len(two)-2].Annotations["conflict_outcome"]; a.Data != "resolved" || !a.Cross.Enabled {
+		t.Fatalf("the transcript's own pin is now %+v, want it as the application wrote it", a)
+	}
+}
+
+func TestCrossingAfterRestoreHoldsOnlyTheNewTurn(t *testing.T) {
+	noModel(t)
+	build := func() *TodoListExecutive {
+		return replyExecutive(echoPinTree("tree-a", "heard", "Want it held?", true))
+	}
+	first := build()
+	seedPlan(t, first, "tree-a")
+
+	one, sig := first.Call(context.Background(), userTurn())
+	if sig != nil {
+		t.Fatalf("turn one: Call returned %v, want nil", sig)
+	}
+
+	// Between the turns: snapshot the paused executive, round-trip it
+	// through JSON as a store would, and restore into a fresh one built the
+	// same way. The restored step's list holds turn one's pin, marked,
+	// with "cross":{"enabled":true} in the JSON; turnStart is 0 after
+	// Restore, and resume stamps it before Execute reads it.
+	snap, err := TakeSnapshot(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"cross":{"enabled":true}`) {
+		t.Fatalf("the snapshot lost turn one's mark, so the restored turn could not re-cross it even if the boundary were wrong: %s", b)
+	}
+	var stored Snapshot
+	if err := json.Unmarshal(b, &stored); err != nil {
+		t.Fatal(err)
+	}
+	second := build()
+	if err := stored.Restore(second); err != nil {
+		t.Fatal(err)
+	}
+
+	two, sig := second.Call(context.Background(), AppendToMessages(one, llm.ChatCompletionMessage{
+		Role: llm.ChatMessageRoleUser, Content: "Yes please",
+	}))
+	if sig != nil {
+		t.Fatalf("turn two: Call returned %v, want nil", sig)
+	}
+	if n := len(second.Crossed); n != 1 || second.Crossed[0].Name != "heard:Yes please" {
+		t.Fatalf("turn two after a restore crossed %+v, want only heard:Yes please: the restored step's earlier turn must not be re-crossed", second.Crossed)
+	}
+	if got := crossedOn(t, two.LastMessage(), "heard:Yes please"); got.Data != "heard Yes please" {
+		t.Fatalf("the reply carries heard:Yes please = %v, want heard Yes please", got.Data)
+	}
+	if _, ok := two.LastMessage().Annotations["heard:Hello"]; ok {
+		t.Fatal("the reply carries turn one's pin: the restored step's earlier turn was crossed again")
+	}
+}
