@@ -756,6 +756,40 @@ func TestExecuteSummarizerUsesConfiguredModel(t *testing.T) {
 	})
 }
 
+func TestSummaryPreambleOpensBothSummarizerPrompts(t *testing.T) {
+	exec := replyExecutive()
+	exec.Preamble = "PLANNER RULES: return []"
+	exec.SummaryPreamble = "REPLY VOICE: plain sentences"
+
+	for name, workInProcess := range map[string]bool{"final": false, "work in process": true} {
+		got := exec.summarizerSystemPrompt(userTurn(), "user: hi\n", []string{"A finished"}, workInProcess)
+		if !strings.HasPrefix(got, "REPLY VOICE: plain sentences") {
+			t.Fatalf("%s prompt does not open with SummaryPreamble: %q", name, got[:min(len(got), 80)])
+		}
+		if strings.Contains(got, "PLANNER RULES") {
+			t.Fatalf("%s prompt still carries the planner's Preamble: %q", name, got[:min(len(got), 80)])
+		}
+	}
+
+	exec.SummaryPreamble = ""
+	got := exec.summarizerSystemPrompt(userTurn(), "user: hi\n", []string{"A finished"}, false)
+	if !strings.HasPrefix(got, "PLANNER RULES: return []") {
+		t.Fatalf("empty SummaryPreamble should fall back to Preamble, got %q", got[:min(len(got), 80)])
+	}
+}
+
+func TestCopyCarriesSummaryPreamble(t *testing.T) {
+	exec := replyExecutive()
+	exec.SummaryPreamble = "REPLY VOICE"
+	copied, ok := exec.Copy().(*TodoListExecutive)
+	if !ok {
+		t.Fatal("Copy() did not return a *TodoListExecutive")
+	}
+	if copied.SummaryPreamble != exec.SummaryPreamble {
+		t.Fatalf("Copy().SummaryPreamble = %q, want %q", copied.SummaryPreamble, exec.SummaryPreamble)
+	}
+}
+
 func TestExecuteLoneFinishedStepRepliesAsWritten(t *testing.T) {
 	noModel(t)
 	exec := replyExecutive(cannedTree("tree-a", "the reply, as written"))

@@ -107,9 +107,16 @@ type ToolCallRecord struct {
 const AnnotationToolCalls = "tool_calls"
 
 type TodoListExecutive struct {
-	ExecName           string
-	ExecDescription    string
-	Preamble           string
+	ExecName        string
+	ExecDescription string
+	Preamble        string
+	// SummaryPreamble, when set, opens both summarizer prompts in place of
+	// Preamble. Preamble also drives the planner, so a preamble written for
+	// the planner's rules (the direction format, the empty-array rule) leaks
+	// them into the summarizer and can shape a merged reply as planner
+	// output. Empty keeps Preamble for the summarizers, so existing
+	// executives reply as before.
+	SummaryPreamble    string
 	Behaviors          []Step
 	OutOfBoundsHandler Behavior
 	MaxPlanDepth       int
@@ -231,10 +238,23 @@ func fixJSON(ctx context.Context, j, modelURI string) (string, error) {
 }
 
 func (e *TodoListExecutive) interpolatedPreamble(messages AnnotatedMessages) string {
+	return interpolatePreamble(e.Preamble, messages)
+}
+
+// interpolatedSummaryPreamble is what the summarizer prompts open with:
+// SummaryPreamble when set, Preamble otherwise.
+func (e *TodoListExecutive) interpolatedSummaryPreamble(messages AnnotatedMessages) string {
+	if e.SummaryPreamble == "" {
+		return e.interpolatedPreamble(messages)
+	}
+	return interpolatePreamble(e.SummaryPreamble, messages)
+}
+
+func interpolatePreamble(text string, messages AnnotatedMessages) string {
 	var buf bytes.Buffer
 	var tmpl AnnotationTemplate
 
-	_, err := tmpl.Parse(e.Preamble)
+	_, err := tmpl.Parse(text)
 	if err != nil {
 		panic(err)
 	}
@@ -607,6 +627,25 @@ func triage(results []PlanResult) turnOutcome {
 	return out
 }
 
+// summarizerSystemPrompt renders one of the summarizer prompts with the
+// executive's Preamble or, when set, SummaryPreamble. workInProcess selects
+// the prompt that merges steps still waiting, the same way Execute does.
+func (e *TodoListExecutive) summarizerSystemPrompt(messages AnnotatedMessages, transcript string, summaries []string, workInProcess bool) string {
+	prompt := executiveSummarizerPrompt
+	if workInProcess {
+		prompt = workInProcessSummarizerPrompt
+	}
+
+	var buf bytes.Buffer
+	t := template.Must(template.New("summarizer").Parse(prompt))
+	t.Execute(&buf, struct {
+		Transcript string
+		Summaries  []string
+		Preamble   string
+	}{transcript, summaries, e.interpolatedSummaryPreamble(messages)})
+	return buf.String()
+}
+
 var executiveSummarizerPrompt = `{{ .Preamble }}
 
 Given the following chat transcript:
@@ -688,12 +727,9 @@ func (e *TodoListExecutive) execute(ctx context.Context, messages AnnotatedMessa
 		return nil
 	}
 
-	var info = struct {
+	var info struct {
 		Transcript string
 		Summaries  []string
-		Preamble   string
-	}{
-		Preamble: e.interpolatedPreamble(messages),
 	}
 
 	for _, m := range messages {
@@ -741,14 +777,7 @@ final:
 		return nil
 	}
 
-	prompt := executiveSummarizerPrompt
-	if len(e.plan) > 0 {
-		prompt = workInProcessSummarizerPrompt
-	}
-
-	var buf bytes.Buffer
-	t := template.Must(template.New("summarizer").Parse(prompt))
-	t.Execute(&buf, info)
+	system := e.summarizerSystemPrompt(messages, info.Transcript, info.Summaries, len(e.plan) > 0)
 
 	// The summarizer is the executive's own state, called through the
 	// traced wrapper so its begin and end ride the trace like any state's.
@@ -761,7 +790,7 @@ final:
 		Name:        "summarize",
 		Description: "Writes the turn's reply from the steps' results",
 		ClientID:    e.ClientID,
-		System:      buf.String(),
+		System:      system,
 		Model:       summaryModel,
 	})
 	m, sig := summarize.Call(ctx, AnnotatedMessages{
@@ -801,6 +830,7 @@ func (e *TodoListExecutive) Copy() Behavior {
 	t.ExecName = e.ExecName
 	t.ExecDescription = e.ExecDescription
 	t.Preamble = e.Preamble
+	t.SummaryPreamble = e.SummaryPreamble
 	t.MaxPlanDepth = e.MaxPlanDepth
 	t.hash = e.hash
 	t.ClientID = e.ClientID

@@ -11,16 +11,17 @@ import (
 var arborealPlanner = LuaTypeExport{
 	Name: "planner",
 	Methods: map[string]lua.LGFunction{
-		"name":        arborealBehaviorNameGetter,
-		"description": arborealBehaviorDescriptionGetter,
-		"preamble":    arborealPreambleGetterAndSetter,
-		"call":        arborealBehaviorCallFn,
-		"copy":        arborealBehaviorCopy,
-		"plan":        arborealPlannerPlan,
-		"execute":     arborealPlannerExecute,
-		"output":      arborealTodoListExecOutput,
-		"oob":         arborealOOBHandlerGetterAndSetter,
-		"client_id":   arborealPlannerClientIDGetterAndSetter,
+		"name":             arborealBehaviorNameGetter,
+		"description":      arborealBehaviorDescriptionGetter,
+		"preamble":         arborealPreambleGetterAndSetter,
+		"summary_preamble": arborealSummaryPreambleGetterAndSetter,
+		"call":             arborealBehaviorCallFn,
+		"copy":             arborealBehaviorCopy,
+		"plan":             arborealPlannerPlan,
+		"execute":          arborealPlannerExecute,
+		"output":           arborealTodoListExecOutput,
+		"oob":              arborealOOBHandlerGetterAndSetter,
+		"client_id":        arborealPlannerClientIDGetterAndSetter,
 	},
 	Index: true,
 }
@@ -80,6 +81,20 @@ func arborealPreambleGetterAndSetter(l *lua.LState) int {
 	} else {
 		preamble := l.CheckString(2)
 		exec.Preamble = preamble
+		return 0
+	}
+}
+
+func arborealSummaryPreambleGetterAndSetter(l *lua.LState) int {
+	exec := checkArborealPlanner(l)
+
+	// Getter
+	if l.GetTop() == 1 {
+		l.Push(lua.LString(exec.SummaryPreamble))
+		return 1
+	} else {
+		preamble := l.CheckString(2)
+		exec.SummaryPreamble = preamble
 		return 0
 	}
 }
